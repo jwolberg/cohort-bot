@@ -12,6 +12,7 @@ no dedup and no cursor advance.
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,10 @@ from app.summarizer.claude import ClaudeSummarizer
 from app.tasks.queue import TaskEnqueuer
 
 logger = get_logger(__name__)
+
+# Cloud Monitoring alerts on the absence of this log over a ~26h window
+# (deploy/setup.sh creates the log-based metric + alert policy, U12).
+HEARTBEAT_EVENT = "digest_heartbeat"
 
 
 @dataclass
@@ -134,18 +139,39 @@ class DigestPipeline:
     # --- scheduled fan-out ---
 
     async def run_fanout(self) -> int:
-        """Post the digest header and enqueue one task per enabled user."""
+        """Post the digest header and enqueue one task per enabled user.
+
+        Emits the SLO heartbeat only after the header successfully posts to the
+        channel — a failure to post (or missing channel) leaves no heartbeat, so
+        the Cloud Monitoring alert fires (ARCHITECTURE §11).
+        """
+        started = time.monotonic()
         config = await self._repos.config.get()
         channel = config.get("digest_channel_id", "")
         users = await self._repos.tracked_users.list_enabled()
+
+        posted = False
         if channel and users:
             today = datetime.now(timezone.utc).strftime("%B %-d")
             await self._rest.post_channel_message(
                 channel, content=f"📊 **GitHub Daily Digest** — {today} · {len(users)} tracked"
             )
+            posted = True
+
         for user in users:
             await self._enqueuer.enqueue_digest_user({"username": user["username"]})
-        log_event(logger, "digest_fanout", users=len(users))
+
+        duration_ms = round((time.monotonic() - started) * 1000)
+        if posted:
+            log_event(
+                logger, HEARTBEAT_EVENT,
+                users=len(users), channel=channel, duration_ms=duration_ms,
+            )
+        else:
+            logger.warning(
+                "digest_not_posted",
+                extra={"users": len(users), "channel": channel, "reason": "no channel or no users"},
+            )
         return len(users)
 
     async def process_user(self, username: str) -> bool:
