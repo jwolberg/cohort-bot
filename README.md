@@ -74,54 +74,17 @@ tests/             pytest suite (emulator + mocks)
 
 ## Deployment
 
-Everything runs on Google Cloud Run (scale-to-zero). Deploy in three passes.
+Everything runs on Google Cloud Run (scale-to-zero). See **[DEPLOY.md](DEPLOY.md)**
+for the full production runbook — prerequisites, the ordered `setup.sh` →
+Cloud Build → runtime-env → IAP → Discord sequence, verification checklist, and
+troubleshooting. The short version:
 
-**1. Provision infrastructure** (idempotent — safe to re-run):
-
-```bash
-PROJECT_ID=my-project REGION=us-central1 bash deploy/setup.sh
-```
-
-This enables APIs and creates: the `digest-bot-sa` service account with
-least-privilege IAM (`datastore.user`, `cloudtasks.enqueuer`,
-`secretmanager.secretAccessor`, `run.invoker`), an Artifact Registry repo,
-**Firestore in Native mode** (irreversible), a TTL policy on
-`processed_commits.expire_at`, the `digest-fanout` + `interaction-followups`
-Cloud Tasks queues, empty Secret Manager secrets, and a `digest_heartbeat`
-log-based metric.
-
-Set the secret values:
-
-```bash
-printf %s "<value>" | gcloud secrets versions add DISCORD_PUBLIC_KEY --data-file=-
-# ...repeat for DISCORD_TOKEN, DISCORD_APP_ID, GITHUB_TOKEN, ANTHROPIC_API_KEY
-```
-
-**2. Build & deploy** the container (secrets are mapped in as env vars):
-
-```bash
-gcloud builds submit --config deploy/cloudbuild.yaml \
-  --substitutions=_REGION=us-central1
-```
-
-**3. Finish wiring** — re-run `setup.sh` with the deployed URL to create the
-Cloud Scheduler `daily-digest` job (OIDC → `/tasks/digest/run`):
-
-```bash
-PROJECT_ID=my-project REGION=us-central1 SERVICE_URL=https://digest-bot-xxxx.a.run.app \
-  bash deploy/setup.sh
-```
-
-Then, manually:
-- Front `/admin/*` with **Identity-Aware Proxy** and grant your account
-  `roles/iap.httpsResourceAccessor`.
-- Register slash commands:
-  `uv run python -m scripts.register_commands --guild <GUILD_ID>`.
-- In the Discord Developer Portal, set the **Interactions Endpoint URL** to
-  `https://<service-url>/interactions` (Discord sends a PING, expects a signed
-  PONG — the service must be deployed first).
-- Create a Cloud Monitoring alert that pages when `logging/user/digest_heartbeat`
-  reports no data over ~26h (SLO: daily digest posts >99% of days).
-
-Firestore is created in **Native mode** — this choice is made once at database
-creation and cannot be changed.
+1. `bash deploy/setup.sh` — provision infra (creates **Firestore in Native mode**,
+   an irreversible one-time choice; SA + least-priv IAM; queues; secrets; TTL;
+   heartbeat metric).
+2. Set the 5 secret values in Secret Manager.
+3. `gcloud builds submit --config deploy/cloudbuild.yaml` — build + deploy.
+4. Set `SERVICE_URL` + `TASK_INVOKER_SA_EMAIL` runtime env, then re-run
+   `setup.sh` with `SERVICE_URL` to create the Cloud Scheduler job.
+5. Front `/admin/*` with IAP, register slash commands, and set the Discord
+   Interactions Endpoint URL to `<service-url>/interactions`.

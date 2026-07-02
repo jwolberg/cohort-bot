@@ -55,9 +55,10 @@ class Settings(BaseSettings):
     # Summarizer model (Haiku default; Sonnet for richer digests).
     summarizer_model: str = Field("claude-haiku-4-5", alias="SUMMARIZER_MODEL")
 
-    # IAP JWT audience for /admin/* (Cloud Run:
-    # /projects/PROJECT_NUMBER/apps/PROJECT_ID). When set, the signed IAP
-    # assertion is verified; the unsigned identity header is never trusted alone.
+    # IAP JWT audience for /admin/* (Cloud Run behind an HTTPS load balancer:
+    # /projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID). When
+    # set, the signed IAP assertion is verified; the unsigned identity header is
+    # never trusted alone.
     iap_audience: str = Field("", alias="IAP_AUDIENCE")
     # Fallback admin auth when IAP is not in front of /admin/* (local dev).
     admin_token: str = Field("", alias="ADMIN_TOKEN")

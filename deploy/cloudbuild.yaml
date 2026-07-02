@@ -41,8 +41,13 @@ steps:
       - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
       - "--region=${_REGION}"
       - "--service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
-      - "--no-allow-unauthenticated"
-      - "--set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_LOCATION=${_REGION}"
+      # Public ingress is REQUIRED: Discord calls /interactions with no GCP
+      # identity (verified in-app via Ed25519). /tasks/* are protected in-app by
+      # OIDC, /admin/* by IAP or ADMIN_TOKEN. Do NOT use --no-allow-unauthenticated.
+      - "--allow-unauthenticated"
+      # --update-env-vars MERGES (does not wipe) — preserves SERVICE_URL,
+      # TASK_INVOKER_SA_EMAIL, and IAP_AUDIENCE set post-deploy (see DEPLOY.md).
+      - "--update-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_LOCATION=${_REGION}"
       - "--update-secrets=DISCORD_PUBLIC_KEY=DISCORD_PUBLIC_KEY:latest,DISCORD_TOKEN=DISCORD_TOKEN:latest,DISCORD_APP_ID=DISCORD_APP_ID:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest"
 
 options:
