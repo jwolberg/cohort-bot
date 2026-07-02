@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 # Route paths the tasks target on this service.
 FOLLOWUP_PATH = "/tasks/followup"
 DIGEST_USER_PATH = "/tasks/digest/user"
+DIGEST_RUN_PATH = "/tasks/digest/run"
 
 
 class EnqueueError(Exception):
@@ -78,4 +79,10 @@ class TaskEnqueuer:
     async def enqueue_digest_user(self, payload: dict[str, Any]) -> str:
         return await self.enqueue(
             self._settings.digest_fanout_queue, DIGEST_USER_PATH, payload
+        )
+
+    async def enqueue_digest_run(self, payload: dict[str, Any] | None = None) -> str:
+        """Trigger a full digest run (used by the admin 'test digest' button)."""
+        return await self.enqueue(
+            self._settings.digest_fanout_queue, DIGEST_RUN_PATH, payload or {}
         )

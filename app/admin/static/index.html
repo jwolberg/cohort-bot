@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cohort Bot — Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-3xl mx-auto p-6" x-data="admin()" x-init="init()">
+    <header class="mb-6">
+      <h1 class="text-2xl font-semibold">GitHub Digest — Admin</h1>
+      <p class="text-sm text-slate-500">Manage tracked users, digest config, and trigger a test digest.</p>
+    </header>
+
+    <!-- Local-dev auth: under IAP this is ignored (cookie auth is used). -->
+    <div class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <label class="block text-sm font-medium mb-1">Admin token (local dev only)</label>
+      <input type="password" x-model="token" @change="save()"
+             class="w-full border rounded px-3 py-2 text-sm" placeholder="ADMIN_TOKEN" />
+    </div>
+
+    <div x-show="error" x-text="error" class="mb-4 text-sm text-red-600"></div>
+    <div x-show="notice" x-text="notice" class="mb-4 text-sm text-green-700"></div>
+
+    <!-- Tracked users -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-3">Tracked users</h2>
+      <form @submit.prevent="addUser()" class="flex gap-2 mb-3">
+        <input x-model="newUser" placeholder="github-username"
+               class="flex-1 border rounded px-3 py-2 text-sm" />
+        <button class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Add</button>
+      </form>
+      <ul class="divide-y">
+        <template x-for="u in users" :key="u.username">
+          <li class="flex items-center justify-between py-2">
+            <span x-text="u.username" class="font-mono text-sm"></span>
+            <button @click="removeUser(u.username)" class="text-red-600 text-sm">Remove</button>
+          </li>
+        </template>
+        <li x-show="users.length === 0" class="py-2 text-sm text-slate-400">No tracked users.</li>
+      </ul>
+    </section>
+
+    <!-- Config -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-3">Digest config</h2>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <label class="block text-sm">Channel ID
+          <input x-model="config.digest_channel_id" class="w-full border rounded px-3 py-2 text-sm mt-1" />
+        </label>
+        <label class="block text-sm">Hour (UTC)
+          <input type="number" x-model.number="config.digest_hour_utc" class="w-full border rounded px-3 py-2 text-sm mt-1" />
+        </label>
+      </div>
+      <label class="block text-sm mb-3">Admin role IDs (comma-separated)
+        <input x-model="adminRoles" class="w-full border rounded px-3 py-2 text-sm mt-1" />
+      </label>
+      <button @click="saveConfig()" class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Save config</button>
+    </section>
+
+    <!-- Test digest -->
+    <section class="bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-3">Test digest</h2>
+      <button @click="testDigest()" class="bg-emerald-600 text-white rounded px-4 py-2 text-sm">
+        Run test digest now
+      </button>
+    </section>
+  </div>
+
+  <script>
+    function admin() {
+      return {
+        token: '', users: [], config: {}, adminRoles: '',
+        newUser: '', error: '', notice: '',
+        init() {
+          this.token = localStorage.getItem('adminToken') || '';
+          this.loadUsers();
+          this.loadConfig();
+        },
+        save() { localStorage.setItem('adminToken', this.token); },
+        headers() {
+          const h = { 'Content-Type': 'application/json' };
+          if (this.token) h['Authorization'] = 'Bearer ' + this.token;
+          return h;
+        },
+        async api(method, path, body) {
+          this.error = '';
+          const res = await fetch('/admin/api' + path, {
+            method, headers: this.headers(),
+            body: body ? JSON.stringify(body) : undefined,
+          });
+          if (!res.ok) { this.error = 'Request failed: ' + res.status; throw new Error(res.status); }
+          return res.json();
+        },
+        async loadUsers() {
+          try { this.users = (await this.api('GET', '/users')).users; } catch (e) {}
+        },
+        async loadConfig() {
+          try {
+            this.config = await this.api('GET', '/config');
+            this.adminRoles = (this.config.admin_role_ids || []).join(', ');
+          } catch (e) {}
+        },
+        async addUser() {
+          if (!this.newUser) return;
+          try { await this.api('POST', '/users', { username: this.newUser }); this.newUser = ''; this.loadUsers(); } catch (e) {}
+        },
+        async removeUser(username) {
+          try { await this.api('DELETE', '/users/' + encodeURIComponent(username)); this.loadUsers(); } catch (e) {}
+        },
+        async saveConfig() {
+          const roles = this.adminRoles.split(',').map(s => s.trim()).filter(Boolean);
+          try {
+            this.config = await this.api('PUT', '/config', {
+              digest_channel_id: this.config.digest_channel_id,
+              digest_hour_utc: this.config.digest_hour_utc,
+              admin_role_ids: roles,
+            });
+            this.notice = 'Config saved.'; setTimeout(() => this.notice = '', 3000);
+          } catch (e) {}
+        },
+        async testDigest() {
+          try { await this.api('POST', '/digest/test'); this.notice = 'Test digest enqueued.'; setTimeout(() => this.notice = '', 3000); } catch (e) {}
+        },
+      };
+    }
+  </script>
+</body>
+</html>

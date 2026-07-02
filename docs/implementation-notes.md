@@ -18,6 +18,20 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### U10 — Admin panel
+- **Auth:** `require_admin` authorizes if the IAP identity header
+  (`X-Goog-Authenticated-User-Email`) is present (IAP sets it only on forwarded
+  requests) OR a valid `ADMIN_TOKEN` bearer is supplied (local-dev fallback).
+  Follow-up/hardening: verify the `X-Goog-IAP-JWT-Assertion` signature rather
+  than trusting the email header, in case the service is ever reachable without
+  IAP in front.
+- **Parity:** admin API and Discord `/track` share the same `Repositories`.
+- **Test gotcha:** Starlette's sync `TestClient` uses a fresh event loop per
+  request, which breaks the loop-bound async Firestore gRPC channel across
+  multi-request tests. Admin API tests drive the app via in-loop
+  `httpx.ASGITransport` so all requests share the pytest-asyncio loop.
+  Production (single uvicorn loop) is unaffected.
+
 ### U9 — Daily digest pipeline
 - **Resolved §14 open decision (message shape):** scheduled digest uses
   **per-user fan-out messages** — `/tasks/digest/run` posts one batched header
