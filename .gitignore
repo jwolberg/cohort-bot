@@ -9,6 +9,11 @@ venv/
 *.egg-info/
 .ruff_cache/
 tests/.firestore-emulator.log
+dist/
+build/
+
+# Transient session state
+.claude/scheduled_tasks.lock
 
 # Local env
 backend/.env
