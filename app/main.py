@@ -32,6 +32,13 @@ def create_app() -> FastAPI:
         pass
 
     try:
+        from app.discord.handlers import install_handlers
+
+        install_handlers()
+    except ImportError:  # command handlers (U7) not yet present
+        pass
+
+    try:
         from app.admin.api import router as admin_router
 
         app.include_router(admin_router)

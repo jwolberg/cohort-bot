@@ -39,5 +39,5 @@ def test_missing_required_setting_raises_clear_error(monkeypatch: pytest.MonkeyP
 
 def test_app_wires_healthz_route() -> None:
     app = create_app()
-    paths = {route.path for route in app.routes}
+    paths = {getattr(route, "path", None) for route in app.routes}
     assert "/healthz" in paths
