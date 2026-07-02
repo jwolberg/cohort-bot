@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.discord import responses
 from app.discord.verify import verify_signature
 from app.logging import get_logger
+from app.tasks.auth import require_oidc
 
 logger = get_logger(__name__)
 
@@ -31,14 +32,22 @@ PING = 1
 APPLICATION_COMMAND = 2
 
 CommandDispatcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+FollowupHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 _dispatcher: CommandDispatcher | None = None
+_followup_handler: FollowupHandler | None = None
 
 
 def set_command_dispatcher(dispatcher: CommandDispatcher) -> None:
     """Register the coroutine that turns a command interaction into a response."""
     global _dispatcher
     _dispatcher = dispatcher
+
+
+def set_followup_handler(handler: FollowupHandler) -> None:
+    """Register the coroutine that runs deferred slow-command work (U7)."""
+    global _followup_handler
+    _followup_handler = handler
 
 
 def get_public_key() -> str:
@@ -76,3 +85,17 @@ async def interactions(
         return JSONResponse(await _dispatcher(interaction))
 
     raise HTTPException(status_code=400, detail=f"unsupported interaction type {itype}")
+
+
+@router.post("/tasks/followup", dependencies=[Depends(require_oidc)])
+async def tasks_followup(request: Request) -> JSONResponse:
+    """Run deferred slow-command work enqueued by the dispatcher (U7/U8).
+
+    Protected by OIDC — only Cloud Tasks (as the service account) may call it.
+    """
+    payload = await request.json()
+    if _followup_handler is None:
+        logger.warning("no_followup_handler_registered")
+        raise HTTPException(status_code=503, detail="follow-up handler not ready")
+    await _followup_handler(payload)
+    return JSONResponse({"status": "ok"})
