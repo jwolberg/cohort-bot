@@ -42,7 +42,16 @@ async def require_oidc(
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = header[len("Bearer ") :].strip()
     try:
-        return verify_oidc_token(token, settings.effective_oidc_audience)
+        claims = verify_oidc_token(token, settings.effective_oidc_audience)
     except Exception as exc:  # noqa: BLE001 - any failure is a rejected caller
         logger.warning("oidc_verification_failed")
         raise HTTPException(status_code=403, detail="invalid OIDC token") from exc
+
+    # Defense in depth: a valid-audience token proves *a* Google identity, not
+    # *our* service account. Require the caller's email to match the expected SA
+    # so a token minted by an unrelated account cannot invoke worker endpoints.
+    expected = settings.task_invoker_sa_email
+    if expected and claims.get("email") != expected:
+        logger.warning("oidc_unexpected_caller", extra={"email": claims.get("email")})
+        raise HTTPException(status_code=403, detail="unexpected caller identity")
+    return claims

@@ -15,6 +15,8 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 
 from app.config import Settings, get_settings
 from app.store.repositories import Repositories, get_repositories
@@ -24,16 +26,35 @@ router = APIRouter(prefix="/admin")
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+# IAP signs its assertion with these rotating keys (distinct from OAuth certs).
+IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
+
 # Config keys the panel may edit.
 _EDITABLE_CONFIG = ("digest_channel_id", "digest_hour_utc", "admin_role_ids")
 
 
+def verify_iap_jwt(assertion: str, audience: str) -> dict[str, Any]:
+    """Verify IAP's signed ``X-Goog-IAP-JWT-Assertion`` (separated for tests)."""
+    request = google_requests.Request()
+    return id_token.verify_token(
+        assertion, request, audience=audience, certs_url=IAP_CERTS_URL
+    )
+
+
 def require_admin(request: Request, settings: Settings = Depends(get_settings)) -> None:
-    """Authorize an admin request via IAP identity or the fallback bearer token."""
-    # IAP sets this header on every request it forwards; its presence means the
-    # caller passed Google sign-in + the IAP allow-list at the edge.
-    if request.headers.get("X-Goog-Authenticated-User-Email"):
-        return
+    """Authorize an admin request via a *verified* IAP assertion or a bearer token.
+
+    The unsigned ``X-Goog-Authenticated-User-Email`` header is never trusted on
+    its own — only IAP's cryptographically signed assertion (when an
+    ``IAP_AUDIENCE`` is configured) or the shared admin bearer token authorize.
+    """
+    assertion = request.headers.get("X-Goog-IAP-JWT-Assertion")
+    if assertion and settings.iap_audience:
+        try:
+            verify_iap_jwt(assertion, settings.iap_audience)
+            return
+        except Exception as exc:  # noqa: BLE001 - any verification failure is a reject
+            raise HTTPException(status_code=403, detail="invalid IAP assertion") from exc
     auth = request.headers.get("Authorization", "")
     if settings.admin_token and auth == f"Bearer {settings.admin_token}":
         return

@@ -104,8 +104,11 @@ async def test_fetch_branches_returns_commit_author_updated() -> None:
 
 
 @respx.mock
-async def test_commits_since_filters_by_cursor_boundary() -> None:
-    # Events newest-first; cursor is exactly the middle event's time.
+async def test_commits_since_boundary_is_inclusive_of_same_second() -> None:
+    # Events newest-first; cursor equals the middle event's second. That event
+    # is re-included (not dropped) so a distinct same-second push isn't lost;
+    # SHA dedup upstream filters ones already reported. An event strictly before
+    # the cursor stops pagination.
     cursor = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
     events = [
         {
@@ -116,7 +119,13 @@ async def test_commits_since_filters_by_cursor_boundary() -> None:
         },
         {
             "type": "PushEvent",
-            "created_at": "2026-07-01T12:00:00Z",  # == cursor -> excluded (exclusive)
+            "created_at": "2026-07-01T12:00:00Z",  # == cursor -> included (inclusive)
+            "repo": {"name": "o/r"},
+            "payload": {"commits": [{"sha": "same1", "message": "m", "author": {"name": "Jay"}}]},
+        },
+        {
+            "type": "PushEvent",
+            "created_at": "2026-07-01T11:00:00Z",  # before cursor -> stops paging
             "repo": {"name": "o/r"},
             "payload": {"commits": [{"sha": "old1", "message": "m", "author": {"name": "Jay"}}]},
         },
@@ -126,7 +135,7 @@ async def test_commits_since_filters_by_cursor_boundary() -> None:
     )
     async with GitHubClient("tok") as gh:
         commits = await gh.fetch_user_commits_since("jay", cursor)
-    assert [c.sha for c in commits] == ["new1"]
+    assert [c.sha for c in commits] == ["new1", "same1"]
 
 
 @respx.mock

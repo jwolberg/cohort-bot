@@ -170,6 +170,33 @@ async def test_fanout_enqueues_one_task_per_enabled_user(firestore_client) -> No
     assert "GitHub Daily Digest" in rest.posts[0]["content"]
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_tolerates_enqueue_failure_no_header_dup(firestore_client) -> None:
+    from app.tasks.queue import EnqueueError
+
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_users.add("jay", added_by="a")
+    await repos.tracked_users.add("sarah", added_by="a")
+
+    class FlakyEnqueuer:
+        def __init__(self):
+            self.ok: list[dict] = []
+
+        async def enqueue_digest_user(self, payload):
+            if payload["username"] == "jay":
+                raise EnqueueError("transient")
+            self.ok.append(payload)
+
+    rest = FakeRest()
+    pipeline = DigestPipeline(repos, FlakyEnqueuer(), get_settings(), rest, FakeSummarizer())
+    # A single enqueue failure must not raise (which would 500 → Scheduler retry
+    # → duplicate header). Header posts exactly once; the healthy user enqueues.
+    await pipeline.run_fanout()
+    assert len(rest.posts) == 1
+
+
 # --- On-demand ---
 
 
@@ -230,13 +257,13 @@ def test_digest_run_requires_oidc(client: TestClient) -> None:
 
 
 def test_digest_user_missing_username_400(client: TestClient, monkeypatch) -> None:
-    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"sub": "sa"})
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
     resp = client.post("/tasks/digest/user", json={}, headers={"Authorization": "Bearer x"})
     assert resp.status_code == 400
 
 
 def test_digest_run_valid_dispatches_to_runner(client: TestClient, monkeypatch) -> None:
-    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"sub": "sa"})
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
     called = {}
 
     async def runner():

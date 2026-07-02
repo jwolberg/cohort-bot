@@ -1,6 +1,6 @@
 ---
 title: "feat: GitHub Activity Digest Discord Bot (MVP)"
-status: active
+status: completed
 created: 2026-07-02
 type: feat
 depth: deep

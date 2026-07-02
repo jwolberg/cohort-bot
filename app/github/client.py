@@ -235,7 +235,11 @@ class GitHubClient:
             reached_cursor = False
             for event in events:
                 created = _parse_ts(event.get("created_at"))
-                if since is not None and created is not None and created <= since:
+                # Inclusive lower bound: events sharing the cursor's (1-second)
+                # timestamp are re-included rather than dropped — the
+                # processed_commits SHA dedup filters ones already reported, so
+                # a distinct later push in the same second is never lost.
+                if since is not None and created is not None and created < since:
                     reached_cursor = True
                     break
                 if event.get("type") != "PushEvent":

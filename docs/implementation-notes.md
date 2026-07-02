@@ -18,6 +18,38 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### Code review (post-build, adversarial) — outcomes
+Ran a code-reviewer pass over the auth/idempotency-critical files. Five findings
+confirmed; four fixed, one accepted as a documented tradeoff.
+- **[Critical, fixed] IAP header spoofing** (`admin/api.py`): `require_admin` no
+  longer trusts the unsigned `X-Goog-Authenticated-User-Email` header. It now
+  verifies the signed `X-Goog-IAP-JWT-Assertion` against Google's IAP public
+  keys for the configured `IAP_AUDIENCE`; bearer token remains the local-dev
+  fallback.
+- **[High, fixed] OIDC caller identity** (`tasks/auth.py`): `require_oidc` now
+  also checks the token's `email` claim equals `task_invoker_sa_email` — a
+  valid-audience token from an unrelated Google account no longer passes.
+- **[High, NOT changed — documented tradeoff] duplicate report on crash between
+  post and record** (`digest/pipeline.py process_user`): posting before
+  recording SHAs/cursor is deliberate (the plan prioritizes "recover gracefully
+  after downtime" and no-loss). Recording before posting would instead *lose* a
+  report if the post then failed — strictly worse. A crash in the post→record
+  window yields an at-least-once **message** dup (rare); commit-level dedup via
+  `processed_commits` still bounds duplicate *reporting* to <1% (the PRD metric).
+  True exactly-once would need a transactional outbox / Discord idempotency key —
+  out of MVP scope.
+- **[Medium, fixed] duplicate header on partial-failure retry** (`run_fanout`):
+  per-user enqueue is now best-effort (catch `EnqueueError`, log, continue) so
+  one enqueue failure can't 500 the job and make Cloud Scheduler retry (which
+  would re-post the header).
+- **[Medium, fixed] same-second events silently dropped** (`github/client.py`):
+  the cursor lower bound is now inclusive (`created < since` to stop paging), so
+  a distinct later push sharing the cursor's 1-second timestamp is re-included;
+  SHA dedup filters ones already reported.
+- Ruled out by the reviewer (no change): `_encode` doc-id collisions (GitHub
+  owners can't contain `_`), `audience=""` OIDC bypass (google-auth enforces
+  empty audience → fails closed), Ed25519 verify (correct, constant-time).
+
 ### U11 — Deployment scaffolding
 - **Verification done locally:** `setup.sh` passes `bash -n`; `cloudbuild.yaml`
   is valid YAML; `uv build` produces a wheel (validates the Dockerfile's

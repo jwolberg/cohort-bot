@@ -25,7 +25,7 @@ from app.github.client import GitHubClient, NotFoundError
 from app.logging import get_logger, log_event
 from app.store.repositories import Repositories, get_repositories
 from app.summarizer.claude import ClaudeSummarizer
-from app.tasks.queue import TaskEnqueuer
+from app.tasks.queue import EnqueueError, TaskEnqueuer
 
 logger = get_logger(__name__)
 
@@ -158,14 +158,22 @@ class DigestPipeline:
             )
             posted = True
 
+        # Best-effort per user: a single enqueue failure must not 500 the job
+        # (Cloud Scheduler would retry it and re-post the header). Failed users
+        # are logged and simply miss this run.
+        enqueued = 0
         for user in users:
-            await self._enqueuer.enqueue_digest_user({"username": user["username"]})
+            try:
+                await self._enqueuer.enqueue_digest_user({"username": user["username"]})
+                enqueued += 1
+            except EnqueueError:
+                logger.warning("digest_user_enqueue_failed", extra={"username": user["username"]})
 
         duration_ms = round((time.monotonic() - started) * 1000)
         if posted:
             log_event(
                 logger, HEARTBEAT_EVENT,
-                users=len(users), channel=channel, duration_ms=duration_ms,
+                users=len(users), enqueued=enqueued, channel=channel, duration_ms=duration_ms,
             )
         else:
             logger.warning(

@@ -8,11 +8,15 @@ break. Production runs a single uvicorn loop, so this only affects tests.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 from httpx import ASGITransport
 
+from app.admin import api as api_module
 from app.admin.api import get_enqueuer, get_repos
+from app.config import get_settings
 from app.main import create_app
 from app.store.repositories import get_repositories
 
@@ -50,14 +54,41 @@ async def test_unauthenticated_request_is_rejected(wired) -> None:
         assert (await ac.get("/admin/api/users")).status_code == 401
 
 
-async def test_iap_identity_header_authorizes(wired) -> None:
+async def test_unsigned_iap_email_header_no_longer_authorizes(wired) -> None:
+    # The spoofable identity header alone must NOT grant admin — only a verified
+    # IAP assertion or the bearer token does.
     app, _, _ = wired
     async with _ac(app) as ac:
         resp = await ac.get(
             "/admin/api/users",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:me@x.com"},
         )
+    assert resp.status_code == 401
+
+
+async def test_verified_iap_assertion_authorizes(wired, monkeypatch) -> None:
+    app, _, _ = wired
+    monkeypatch.setattr(api_module, "verify_iap_jwt", lambda assertion, aud: {"email": "me@x.com"})
+    app.dependency_overrides[get_settings] = lambda: SimpleNamespace(
+        iap_audience="/projects/123/apps/proj", admin_token=""
+    )
+    async with _ac(app) as ac:
+        resp = await ac.get("/admin/api/users", headers={"X-Goog-IAP-JWT-Assertion": "signed-jwt"})
     assert resp.status_code == 200
+
+
+async def test_invalid_iap_assertion_rejected(wired, monkeypatch) -> None:
+    app, _, _ = wired
+    def _boom(assertion, aud):
+        raise ValueError("bad signature")
+
+    monkeypatch.setattr(api_module, "verify_iap_jwt", _boom)
+    app.dependency_overrides[get_settings] = lambda: SimpleNamespace(
+        iap_audience="/projects/123/apps/proj", admin_token=""
+    )
+    async with _ac(app) as ac:
+        resp = await ac.get("/admin/api/users", headers={"X-Goog-IAP-JWT-Assertion": "forged"})
+    assert resp.status_code == 403
 
 
 async def test_users_crud_shares_store_with_track(wired) -> None:

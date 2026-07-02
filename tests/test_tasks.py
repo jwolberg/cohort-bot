@@ -98,8 +98,13 @@ def test_followup_invalid_token_returns_403(client: TestClient, monkeypatch) -> 
     assert resp.status_code == 403
 
 
+SA_EMAIL = "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"
+
+
 def test_followup_valid_token_dispatches_to_handler(client: TestClient, monkeypatch) -> None:
-    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda token, audience: {"sub": "sa"})
+    monkeypatch.setattr(
+        auth_module, "verify_oidc_token", lambda token, audience: {"email": SA_EMAIL}
+    )
     seen: dict = {}
 
     async def handler(payload: dict) -> None:
@@ -116,3 +121,16 @@ def test_followup_valid_token_dispatches_to_handler(client: TestClient, monkeypa
         assert seen["payload"]["command"] == "repo"
     finally:
         interactions_module.set_followup_handler(None)  # type: ignore[arg-type]
+
+
+def test_followup_wrong_caller_identity_returns_403(client: TestClient, monkeypatch) -> None:
+    # Valid signature/audience but the token is from an unrelated account.
+    monkeypatch.setattr(
+        auth_module, "verify_oidc_token", lambda token, audience: {"email": "attacker@gmail.com"}
+    )
+    resp = client.post(
+        "/tasks/followup",
+        json={"command": "repo"},
+        headers={"Authorization": "Bearer valid-but-wrong-account"},
+    )
+    assert resp.status_code == 403
