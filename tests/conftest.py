@@ -12,8 +12,10 @@ once with ``gcloud components install cloud-firestore-emulator``.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import time
 
 import httpx
@@ -43,7 +45,35 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> None:
+def _gcloud_python() -> str | None:
+    """Find a pre-3.12 interpreter for gcloud.
+
+    The Cloud SDK's launcher imports the stdlib ``imp`` module, which was
+    removed in Python 3.12. Running gcloud under the 3.12 test venv therefore
+    crashes; point ``CLOUDSDK_PYTHON`` at an interpreter that still has ``imp``.
+    """
+    if os.environ.get("CLOUDSDK_PYTHON"):
+        return os.environ["CLOUDSDK_PYTHON"]
+    candidates = ["python3.11", "python3.10", "python3.9", "/usr/bin/python3"]
+    for name in candidates:
+        path = shutil.which(name) or (name if os.path.exists(name) else None)
+        if not path:
+            continue
+        try:
+            out = subprocess.run(
+                [path, "-c", "import imp; import sys; print(sys.version_info[1])"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode == 0:
+            return path
+    return None
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 90.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -66,8 +96,20 @@ def firestore_emulator():
         yield os.environ["FIRESTORE_EMULATOR_HOST"]
         return
 
+    gcloud_python = _gcloud_python()
+    if gcloud_python is None:
+        pytest.skip(
+            "No pre-3.12 interpreter found for gcloud (CLOUDSDK_PYTHON); "
+            "cannot start the Firestore emulator."
+        )
+
+    env = {**os.environ, "CLOUDSDK_PYTHON": gcloud_python}
     port = _free_port()
     host_port = f"localhost:{port}"
+    log_path = os.path.join(
+        os.path.dirname(__file__), ".firestore-emulator.log"
+    )
+    log_file = open(log_path, "w")
     proc = subprocess.Popen(
         [
             "gcloud",
@@ -77,11 +119,18 @@ def firestore_emulator():
             f"--host-port={host_port}",
             f"--project={TEST_PROJECT}",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        env=env,
     )
     try:
-        _wait_for_port("localhost", port)
+        try:
+            _wait_for_port("localhost", port)
+        except RuntimeError:
+            log_file.flush()
+            with open(log_path) as fh:
+                sys.stderr.write("\n--- Firestore emulator log ---\n" + fh.read())
+            raise
         os.environ["FIRESTORE_EMULATOR_HOST"] = host_port
         yield host_port
     finally:
@@ -91,6 +140,7 @@ def firestore_emulator():
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        log_file.close()
 
 
 @pytest.fixture

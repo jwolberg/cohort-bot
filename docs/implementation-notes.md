@@ -18,6 +18,23 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### U2 — Firestore Native data layer
+- **Doc-id encoding:** Firestore ids can't contain `/`, so `owner/repo` is
+  encoded as `owner__repo` in `processed_commits` (`owner__repo@sha`) and
+  `repo_cache` ids — matches the `{repo__sha}`/`{owner__repo}` path hints in
+  ARCHITECTURE §7. The logical key is preserved in the `repo` field.
+- **`remove` = hard delete** (not soft-disable). The `enabled` flag is retained
+  for future soft-disable and drives `list_enabled`, but `/track remove` removes
+  the doc. Satisfies "excluded from list-enabled".
+- **TTL:** `processed_commits` docs store an `expire_at = processed_at + 90d`
+  field; the actual TTL policy on `expire_at` is created in U11 `setup.sh`.
+- **Emulator gotcha (important):** the local gcloud SDK (428) launcher does
+  `import imp`, removed in Python 3.12 — so the emulator crashes when spawned
+  under the 3.12 test venv. Fixed in `conftest.py` by discovering a pre-3.12
+  interpreter and passing it as `CLOUDSDK_PYTHON` to the emulator subprocess.
+  The fixture now captures the emulator log to `tests/.firestore-emulator.log`
+  and prints it on startup failure. Emulator boots in ~4s once warm.
+
 ### U1 — Project scaffolding & configuration
 - **Config source:** `app/config.py` reads settings from **env vars only**
   (pydantic-settings). Decision: rather than call the Secret Manager API at
