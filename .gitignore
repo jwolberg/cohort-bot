@@ -1,0 +1,14 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+
+# Local env
+backend/.env
+.env
