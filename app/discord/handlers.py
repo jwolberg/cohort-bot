@@ -26,6 +26,15 @@ from app.tasks.queue import TaskEnqueuer
 logger = get_logger(__name__)
 
 SLOW_COMMANDS = {"repo", "branches", "user", "digest"}
+
+# The /digest on-demand provider is registered by the digest pipeline (U9).
+_digest_provider = None
+
+
+def set_digest_provider(provider) -> None:
+    """Register the coroutine that builds on-demand /digest embeds (U9)."""
+    global _digest_provider
+    _digest_provider = provider
 _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
 SUB_COMMAND_OPTION_TYPE = 1
@@ -160,8 +169,19 @@ class CommandHandler:
     async def run_followup(self, payload: dict[str, Any]) -> None:
         command = payload["command"]
         opts = payload.get("options", {})
+        sub = payload.get("sub")
         application_id = payload["application_id"]
         token = payload["interaction_token"]
+
+        # /digest is served by the digest pipeline (U9), which returns paginated
+        # embeds; the others build a single embed from the GitHub client.
+        if command == "digest":
+            if _digest_provider is None:
+                embeds = [responses.embed("Unavailable", description="Digest is not available yet.")]
+            else:
+                embeds = await _digest_provider(sub or "today")
+            await self._rest.edit_original_response(application_id, token, embeds=embeds)
+            return
 
         async with self._gh_factory() as gh:
             if command == "repo":

@@ -18,6 +18,28 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### U9 — Daily digest pipeline
+- **Resolved §14 open decision (message shape):** scheduled digest uses
+  **per-user fan-out messages** — `/tasks/digest/run` posts one batched header
+  ("📊 GitHub Daily Digest — <date>") then enqueues one `/tasks/digest/user`
+  task per enabled user; each user task posts its own section message. Rationale:
+  each user's work becomes an independently retryable, idempotent Cloud Task with
+  **no fan-in/join coordination** — directly serving the ">99% success" and
+  "recover gracefully" goals with far less complexity than a batched single
+  message (which would need a Firestore join + last-writer-assembles race). The
+  **on-demand `/digest` command** does use batched, paginated embeds (matches the
+  PRD example header + per-user layout in one interactive response).
+- **Idempotency:** per-user task records `processed_commits` SHAs and advances
+  `last_cursor` **only after** a successful post. Post failure → Cloud Tasks
+  retries; cursor unchanged and SHAs unrecorded, so the retry recomputes and
+  reposts. Tradeoff: post-succeeds-but-record-fails yields an at-least-once
+  message dup (rare); commit-level dedup still holds via `processed_commits`.
+- **Cursor advance:** to the newest commit timestamp seen this run (exclusive
+  cursor), so the next run skips them even before SHA dedup.
+- **On-demand does not dedup or advance cursors** — it's a read-only window view
+  (`compute_section(dedup=False)`), so `/digest today` shows the day's activity
+  regardless of what the scheduled digest already reported.
+
 ### U5 — GitHub REST client
 - **Resolved deferred question (events vs commits):** per-user commit fetch uses
   the **public Events API** (`/users/{u}/events/public`) — one request per user,

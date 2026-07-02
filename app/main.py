@@ -39,6 +39,13 @@ def create_app() -> FastAPI:
         pass
 
     try:
+        from app.digest.pipeline import install_digest
+
+        install_digest()
+    except ImportError:  # digest pipeline (U9) not yet present
+        pass
+
+    try:
         from app.admin.api import router as admin_router
 
         app.include_router(admin_router)

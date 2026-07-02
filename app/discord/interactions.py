@@ -33,9 +33,13 @@ APPLICATION_COMMAND = 2
 
 CommandDispatcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 FollowupHandler = Callable[[dict[str, Any]], Awaitable[None]]
+DigestRunner = Callable[[], Awaitable[None]]
+DigestUserWorker = Callable[[str], Awaitable[None]]
 
 _dispatcher: CommandDispatcher | None = None
 _followup_handler: FollowupHandler | None = None
+_digest_runner: DigestRunner | None = None
+_digest_user_worker: DigestUserWorker | None = None
 
 
 def set_command_dispatcher(dispatcher: CommandDispatcher) -> None:
@@ -48,6 +52,13 @@ def set_followup_handler(handler: FollowupHandler) -> None:
     """Register the coroutine that runs deferred slow-command work (U7)."""
     global _followup_handler
     _followup_handler = handler
+
+
+def set_digest_handlers(runner: DigestRunner, user_worker: DigestUserWorker) -> None:
+    """Register the digest fan-out runner and per-user worker (U9)."""
+    global _digest_runner, _digest_user_worker
+    _digest_runner = runner
+    _digest_user_worker = user_worker
 
 
 def get_public_key() -> str:
@@ -98,4 +109,26 @@ async def tasks_followup(request: Request) -> JSONResponse:
         logger.warning("no_followup_handler_registered")
         raise HTTPException(status_code=503, detail="follow-up handler not ready")
     await _followup_handler(payload)
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/tasks/digest/run", dependencies=[Depends(require_oidc)])
+async def tasks_digest_run() -> JSONResponse:
+    """Cloud Scheduler entry point: fan out the daily digest (OIDC-gated)."""
+    if _digest_runner is None:
+        raise HTTPException(status_code=503, detail="digest runner not ready")
+    await _digest_runner()
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/tasks/digest/user", dependencies=[Depends(require_oidc)])
+async def tasks_digest_user(request: Request) -> JSONResponse:
+    """Per-user digest worker enqueued by the fan-out (OIDC-gated)."""
+    if _digest_user_worker is None:
+        raise HTTPException(status_code=503, detail="digest worker not ready")
+    payload = await request.json()
+    username = payload.get("username")
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+    await _digest_user_worker(username)
     return JSONResponse({"status": "ok"})
