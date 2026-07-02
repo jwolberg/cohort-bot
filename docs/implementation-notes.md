@@ -18,6 +18,19 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### U11 — Deployment scaffolding
+- **Verification done locally:** `setup.sh` passes `bash -n`; `cloudbuild.yaml`
+  is valid YAML; `uv build` produces a wheel (validates the Dockerfile's
+  `pip install .`). Full `docker build`, `setup.sh` execution, and the Cloud Run
+  deploy + Discord PING smoke test **could not run here** (no Docker daemon, no
+  GCP project) — left for the user with real credentials, per the session's
+  stated constraint.
+- **Firestore Native** is created explicitly (irreversible); `setup.sh` guards
+  every resource for idempotent re-runs.
+- **Two-pass deploy:** `setup.sh` (infra) → Cloud Build (deploy, learn URL) →
+  `setup.sh` again with `SERVICE_URL` to create the Scheduler job (needs the
+  live URL as OIDC audience). README documents the full sequence.
+
 ### U10 — Admin panel
 - **Auth:** `require_admin` authorizes if the IAP identity header
   (`X-Goog-Authenticated-User-Email`) is present (IAP sets it only on forwarded

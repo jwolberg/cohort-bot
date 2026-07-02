@@ -1,0 +1,49 @@
+# Build + push the image to Artifact Registry, then deploy to Cloud Run.
+#   gcloud builds submit --config deploy/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=digest-bot,_SERVICE=digest-bot
+#
+# Secrets are mapped into the service from Secret Manager (see deploy/setup.sh),
+# so no secret values appear here or in the image.
+
+substitutions:
+  _REGION: us-central1
+  _REPO: digest-bot
+  _SERVICE: digest-bot
+  _SERVICE_ACCOUNT: digest-bot-sa
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - "-f"
+      - deploy/Dockerfile
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - "."
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "${_SERVICE}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
+      - "--no-allow-unauthenticated"
+      - "--set-env-vars=GCP_PROJECT=${PROJECT_ID},GCP_LOCATION=${_REGION}"
+      - "--update-secrets=DISCORD_PUBLIC_KEY=DISCORD_PUBLIC_KEY:latest,DISCORD_TOKEN=DISCORD_TOKEN:latest,DISCORD_APP_ID=DISCORD_APP_ID:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
