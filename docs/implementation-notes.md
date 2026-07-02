@@ -18,6 +18,20 @@ Dated, tied to the implementation unit (U-ID) being worked.
 - Installed the `cloud-firestore-emulator` gcloud component for U2/U9/U10
   integration tests.
 
+### U5 — GitHub REST client
+- **Resolved deferred question (events vs commits):** per-user commit fetch uses
+  the **public Events API** (`/users/{u}/events/public`) — one request per user,
+  newest-first, early-stop once past the cursor. PushEvent payloads give
+  sha/message/author. Cheaper than enumerating repos; matches ARCHITECTURE §8.
+  Limitation: Events API caps at ~300 recent events, fine for a daily digest.
+- **Cursor boundary is exclusive** (strictly after `last_cursor`); combined with
+  `processed_commits` SHA dedup this makes re-runs safe.
+- **ETag caching** only on repo metadata (`fetch_repo`); recent commits and
+  contributors are small and fetched fresh. `304` returns the cached RepoInfo
+  and does not re-write the cache.
+- **Branch ahead/behind** is best-effort (compare endpoint), enriched only for
+  the first N branches to bound calls — "when available" per PRD.
+
 ### U2 — Firestore Native data layer
 - **Doc-id encoding:** Firestore ids can't contain `/`, so `owner/repo` is
   encoded as `owner__repo` in `processed_commits` (`owner__repo@sha`) and
