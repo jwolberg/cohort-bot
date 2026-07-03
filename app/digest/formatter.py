@@ -13,11 +13,12 @@ from typing import TYPE_CHECKING, Any
 from app.discord import responses
 
 if TYPE_CHECKING:
-    from app.digest.pipeline import UserSection
+    from app.digest.pipeline import PublicationSection, UserSection
 
 # Discord embed limits (kept conservative).
 MAX_FIELDS_PER_EMBED = 25
 MAX_EMBED_VALUE_CHARS = 1024
+MAX_EMBED_TITLE_CHARS = 250  # Discord field-name limit is 256
 MAX_EMBED_TOTAL_CHARS = 5500
 
 
@@ -80,3 +81,44 @@ def format_digest(date_label: str, sections: list["UserSection"]) -> list[dict[s
         description = header if i == 0 else None
         embeds.append(responses.embed(title, description=description, fields=chunk))
     return embeds
+
+
+# --- Substack (native excerpt, no LLM summarization) ---
+
+
+def _post_field(post: Any) -> dict[str, Any]:
+    """One embed field per post: title as name, excerpt + link as value."""
+    name = f'"{post.title}"'[:MAX_EMBED_TITLE_CHARS]
+    parts = [p for p in (post.excerpt, post.url) if p]
+    value = "\n".join(parts)[:MAX_EMBED_VALUE_CHARS] or post.url
+    return responses.field(name, value)
+
+
+def format_publication_section(section: "PublicationSection") -> dict[str, Any]:
+    """One 📰 embed for a single publication's new posts (scheduled per-pub message)."""
+    n = len(section.posts)
+    fields = [_post_field(p) for p in section.posts[:MAX_FIELDS_PER_EMBED]]
+    return responses.embed(
+        f"📰 {section.title}",
+        description=f"{n} new post{'s' if n != 1 else ''}",
+        url=section.feed_url or None,
+        fields=fields,
+    )
+
+
+def format_substack(date_label: str, sections: list["PublicationSection"]) -> list[dict[str, Any]]:
+    """On-demand /substack: one embed per publication, or an empty-state embed."""
+    if not sections:
+        return [
+            responses.embed(
+                "📰 Substack", description=f"{date_label}\nNo recent posts to report."
+            )
+        ]
+    embeds = [format_publication_section(s) for s in sections]
+    # Stamp the window label on the first embed's description for context.
+    total = sum(len(s.posts) for s in sections)
+    embeds[0]["description"] = (
+        f"{date_label} · {total} post{'s' if total != 1 else ''} across "
+        f"{len(sections)} publication{'s' if len(sections) != 1 else ''}"
+    )
+    return embeds[:10]  # Discord allows up to 10 embeds per message

@@ -24,6 +24,7 @@ from app.discord.rest import DiscordREST
 from app.github.client import GitHubClient, NotFoundError
 from app.logging import get_logger, log_event
 from app.store.repositories import Repositories, get_repositories
+from app.substack.client import PostRef, SubstackClient, SubstackError
 from app.summarizer.claude import ClaudeSummarizer
 from app.tasks.queue import EnqueueError, TaskEnqueuer
 
@@ -49,6 +50,16 @@ class UserSection:
     total: int
     repos: list[RepoSection]
     new_shas: dict[str, list[str]] = dataclass_field(default_factory=dict)
+    new_cursor: datetime | None = None
+
+
+@dataclass
+class PublicationSection:
+    slug: str
+    title: str
+    feed_url: str
+    posts: list[PostRef]
+    new_post_ids: list[str] = dataclass_field(default_factory=list)
     new_cursor: datetime | None = None
 
 
@@ -109,6 +120,7 @@ class DigestPipeline:
         summarizer: ClaudeSummarizer,
         *,
         gh_factory: Callable[[], GitHubClient] | None = None,
+        substack_factory: Callable[[], SubstackClient] | None = None,
     ) -> None:
         self._repos = repos
         self._enqueuer = enqueuer
@@ -116,9 +128,13 @@ class DigestPipeline:
         self._rest = rest
         self._summarizer = summarizer
         self._gh_factory = gh_factory or self._default_gh
+        self._substack_factory = substack_factory or self._default_substack
 
     def _default_gh(self) -> GitHubClient:
         return GitHubClient(self._settings.github_token, self._repos.repo_cache)
+
+    def _default_substack(self) -> SubstackClient:
+        return SubstackClient()
 
     # --- shared section computation ---
 
@@ -182,6 +198,54 @@ class DigestPipeline:
         return UserSection(
             username=username, total=total, repos=repo_sections,
             new_shas=new_shas, new_cursor=new_cursor,
+        )
+
+    async def compute_publication_section(
+        self,
+        client: SubstackClient,
+        publication: dict[str, Any],
+        since: datetime | None,
+        *,
+        dedup: bool = True,
+    ) -> PublicationSection | None:
+        """Compute one publication's new posts (mirrors :meth:`compute_section`).
+
+        Best-effort: an unreachable / malformed feed is skipped with a warning and
+        returns None rather than failing the run/command (spec AC#8). With
+        ``dedup`` (scheduled path), posts already in ``processed_posts`` are
+        dropped; the cursor still advances past everything fetched. With
+        ``dedup=False`` (on-demand ``/substack``), all posts in the window are
+        returned and no cursor/dedup state is touched.
+        """
+        slug = publication["slug"]
+        feed_url = publication["feed_url"]
+        try:
+            posts = await client.fetch_posts_since(feed_url, since)
+        except SubstackError as exc:
+            logger.warning(
+                "substack_feed_skipped", extra={"slug": slug, "error": str(exc)}
+            )
+            return None
+        if not posts:
+            return None
+
+        new_cursor = max(p.published for p in posts)
+        if dedup:
+            fresh = [
+                p for p in posts
+                if not await self._repos.processed_posts.has_post(slug, p.post_id)
+            ]
+        else:
+            fresh = posts
+        if not fresh:
+            return None
+        return PublicationSection(
+            slug=slug,
+            title=publication.get("title") or slug,
+            feed_url=feed_url,
+            posts=fresh,
+            new_post_ids=[p.post_id for p in fresh],
+            new_cursor=new_cursor,
         )
 
     # --- scheduled fan-out ---

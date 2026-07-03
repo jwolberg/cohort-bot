@@ -10,8 +10,15 @@ import respx
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
-from app.digest.formatter import format_digest
-from app.digest.pipeline import DigestPipeline, RepoSection, UserSection, _is_low_signal
+from app.digest.formatter import format_digest, format_publication_section, format_substack
+from app.digest.pipeline import (
+    DigestPipeline,
+    PublicationSection,
+    RepoSection,
+    UserSection,
+    _is_low_signal,
+)
+from app.substack.client import PostRef, SubstackError
 from app.discord import interactions as interactions_module
 from app.github.client import GitHubClient
 from app.main import create_app
@@ -92,6 +99,39 @@ def _pipeline(repos, rest, enqueuer=None):
     return DigestPipeline(
         repos, enqueuer or FakeEnqueuer(), get_settings(), rest, FakeSummarizer()
     )
+
+
+def _post(post_id, day, *, title="A post", excerpt="Body"):
+    return PostRef(
+        slug="ex.substack.com",
+        post_id=post_id,
+        title=title,
+        url=f"https://ex.substack.com/p/{post_id}",
+        author="Writer",
+        published=datetime(2026, 7, day, 10, 0, tzinfo=timezone.utc),
+        excerpt=excerpt,
+    )
+
+
+class FakeSubstackClient:
+    """Async-CM stand-in for SubstackClient with preset posts or an error."""
+
+    def __init__(self, posts=None, error=None):
+        self._posts = posts or []
+        self._error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def fetch_posts_since(self, feed_url, since, *, limit=20):
+        if self._error is not None:
+            raise self._error
+        if since is None:
+            return list(self._posts)
+        return [p for p in self._posts if p.published > since]
 
 
 # --- Low-signal commit classifier ---
@@ -253,6 +293,72 @@ async def test_isolated_failure_raises_for_retry(firestore_client) -> None:
     # Cloud Tasks retries on the raised error; other users are unaffected.
     with pytest.raises(RuntimeError):
         await pipeline.process_user("jay")
+
+
+# --- Substack section compute + formatter (S3a) ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_publication_section_dedups_processed_posts(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.processed_posts.record_posts("ex.substack.com", ["p1"])  # already reported
+    pipeline = _pipeline(repos, FakeRest())
+    client = FakeSubstackClient(posts=[_post("p1", 2), _post("p2", 3)])
+    publication = {"slug": "ex.substack.com", "feed_url": "https://ex.substack.com/feed", "title": "Ex"}
+
+    section = await pipeline.compute_publication_section(client, publication, None)
+    assert section is not None
+    assert section.new_post_ids == ["p2"]  # p1 filtered
+    assert section.title == "Ex"
+    # Cursor advances past the whole fetched batch (newest = p2 on Jul 3).
+    assert section.new_cursor == datetime(2026, 7, 3, 10, 0, tzinfo=timezone.utc)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_publication_section_on_demand_skips_dedup(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.processed_posts.record_posts("ex.substack.com", ["p1"])
+    pipeline = _pipeline(repos, FakeRest())
+    client = FakeSubstackClient(posts=[_post("p1", 2), _post("p2", 3)])
+    publication = {"slug": "ex.substack.com", "feed_url": "https://ex.substack.com/feed"}
+
+    section = await pipeline.compute_publication_section(client, publication, None, dedup=False)
+    assert section is not None
+    assert section.new_post_ids == ["p1", "p2"]  # no dedup on-demand
+    assert section.title == "ex.substack.com"  # falls back to slug when title absent
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_publication_section_skips_broken_feed(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    pipeline = _pipeline(repos, FakeRest())
+    client = FakeSubstackClient(error=SubstackError("boom"))
+    publication = {"slug": "ex.substack.com", "feed_url": "https://ex.substack.com/feed"}
+
+    section = await pipeline.compute_publication_section(client, publication, None)
+    assert section is None  # best-effort skip, no raise
+
+
+def test_format_publication_section_renders_posts() -> None:
+    section = PublicationSection(
+        slug="ex.substack.com",
+        title="The Example",
+        feed_url="https://ex.substack.com/feed",
+        posts=[_post("p1", 2, title="Hello", excerpt="An excerpt")],
+    )
+    embed = format_publication_section(section)
+    assert embed["title"] == "📰 The Example"
+    assert embed["description"] == "1 new post"
+    assert '"Hello"' == embed["fields"][0]["name"]
+    assert "An excerpt" in embed["fields"][0]["value"]
+
+
+def test_format_substack_empty_reports_no_posts() -> None:
+    embeds = format_substack("Last 1 day", [])
+    assert "No recent posts" in embeds[0]["description"]
 
 
 # --- Fan-out ---
