@@ -18,11 +18,29 @@ import sys
 from typing import Any
 
 import httpx
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.config import get_settings
 from app.discord.commands import COMMANDS
 
 API_BASE = "https://discord.com/api/v10"
+
+
+class DiscordCreds(BaseSettings):
+    """Only the two settings command registration actually needs.
+
+    Registration is run from a dev machine that has no full ``.env`` (the app's
+    other secrets live in Secret Manager), so it must not require them. Reads
+    ``DISCORD_APP_ID`` / ``DISCORD_TOKEN`` from a ``.env`` file or the
+    environment and ignores everything else.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
+    )
+
+    discord_app_id: str = Field(..., alias="DISCORD_APP_ID")
+    discord_token: str = Field(..., alias="DISCORD_TOKEN")
 
 
 def endpoint(app_id: str, guild_id: str | None) -> str:
@@ -58,11 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--guild", help="Register against a single guild (dev)")
     args = parser.parse_args(argv)
 
-    settings = get_settings()
+    creds = DiscordCreds()
     response = register(
         COMMANDS,
-        app_id=settings.discord_app_id,
-        token=settings.discord_token,
+        app_id=creds.discord_app_id,
+        token=creds.discord_token,
         guild_id=args.guild,
     )
     scope = f"guild {args.guild}" if args.guild else "global"

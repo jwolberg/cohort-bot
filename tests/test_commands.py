@@ -7,7 +7,7 @@ import pytest
 import respx
 
 from app.discord import commands
-from scripts.register_commands import endpoint, register
+from scripts.register_commands import DiscordCreds, endpoint, register
 
 
 def test_command_names_match_expected() -> None:
@@ -63,6 +63,17 @@ def test_digest_declares_today_and_yesterday_subcommands() -> None:
 
 def test_help_has_no_options() -> None:
     assert "options" not in commands.HELP_COMMAND
+
+
+def test_discord_creds_only_requires_discord_fields(monkeypatch) -> None:
+    # Registration must work without the app's other secrets (Secret Manager).
+    for var in ("GITHUB_TOKEN", "ANTHROPIC_API_KEY", "GCP_PROJECT", "DISCORD_PUBLIC_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DISCORD_APP_ID", "app123")
+    monkeypatch.setenv("DISCORD_TOKEN", "bot-tok")
+    creds = DiscordCreds()
+    assert creds.discord_app_id == "app123"
+    assert creds.discord_token == "bot-tok"
 
 
 def test_endpoint_guild_vs_global() -> None:
