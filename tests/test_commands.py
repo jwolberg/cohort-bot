@@ -12,7 +12,15 @@ from scripts.register_commands import endpoint, register
 
 def test_command_names_match_expected() -> None:
     names = {c["name"] for c in commands.COMMANDS}
-    assert names == {"track", "repo", "branches", "user", "digest", "help"}
+    assert names == {"track", "repo", "branches", "user", "digest", "substack", "help"}
+
+
+def test_substack_declares_optional_window_with_choices() -> None:
+    opt = commands.SUBSTACK_COMMAND["options"][0]
+    assert opt["name"] == "window"
+    assert opt["type"] == commands.STRING
+    assert opt["required"] is False
+    assert {c["value"] for c in opt["choices"]} == {"1d", "7d", "30d"}
 
 
 def test_all_commands_are_chat_input() -> None:
@@ -79,7 +87,7 @@ def test_register_puts_to_guild_endpoint_with_payload() -> None:
 
     sent = _json.loads(request.content)
     assert {c["name"] for c in sent} == {
-        "track", "repo", "branches", "user", "digest", "help"
+        "track", "repo", "branches", "user", "digest", "substack", "help"
     }
 
 

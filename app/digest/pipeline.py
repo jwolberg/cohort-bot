@@ -69,6 +69,17 @@ def _start_of_day(day: str) -> datetime:
     return midnight - timedelta(days=1) if day == "yesterday" else midnight
 
 
+# /substack window option → days (default 1d per A2).
+_WINDOW_DAYS = {"1d": 1, "7d": 7, "30d": 30}
+
+
+def _window_since(window: str | None) -> tuple[datetime, str]:
+    """Map a ``/substack`` window option to a since-datetime and a label."""
+    days = _WINDOW_DAYS.get(window or "1d", 1)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return since, f"Last {days} day{'s' if days != 1 else ''}"
+
+
 # Conventional-commit types treated as low-signal for the digest: chores,
 # documentation updates, and bug fixes. Commits carrying one of these types
 # (e.g. "fix: ...", "docs(readme): ...") are excluded so the digest highlights
@@ -378,6 +389,20 @@ class DigestPipeline:
         label = "Today" if day == "today" else "Yesterday"
         return formatter.format_digest(label, sections)
 
+    async def on_demand_substack(self, window: str | None) -> list[dict[str, Any]]:
+        """Recent posts across enabled publications in a window (no dedup, /substack)."""
+        since, label = _window_since(window)
+        publications = await self._repos.tracked_publications.list_enabled()
+        sections: list[PublicationSection] = []
+        async with self._substack_factory() as client:
+            for pub in publications:
+                section = await self.compute_publication_section(
+                    client, pub, since, dedup=False
+                )
+                if section is not None:
+                    sections.append(section)
+        return formatter.format_substack(label, sections)
+
 
 def install_digest() -> None:
     """Wire digest endpoints + the /digest on-demand provider (lazy)."""
@@ -410,6 +435,10 @@ def install_digest() -> None:
     async def _on_demand(day: str) -> list[dict[str, Any]]:
         return await _pipeline().on_demand(day or "today")
 
+    async def _on_demand_substack(window: str | None) -> list[dict[str, Any]]:
+        return await _pipeline().on_demand_substack(window)
+
     interactions_module.set_digest_handlers(_run, _user)
     interactions_module.set_publication_worker(_publication)
     handlers_module.set_digest_provider(_on_demand)
+    handlers_module.set_substack_provider(_on_demand_substack)

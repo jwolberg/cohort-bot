@@ -442,6 +442,29 @@ async def test_fanout_enqueues_one_task_per_publication(firestore_client) -> Non
     assert {p["slug"] for p in enqueuer.substack_pubs} == {"a.substack.com", "b.substack.com"}
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_demand_substack_lists_recent_posts(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.tracked_publications.add(
+        "ex.substack.com", "https://ex.substack.com/feed", title="Ex", added_by="a"
+    )
+    # 30d window reaches back past the July sample dates regardless of run time.
+    pipeline = _substack_pipeline(repos, FakeRest(), posts=[_post("p1", 2), _post("p2", 3)])
+    embeds = await pipeline.on_demand_substack("30d")
+    assert embeds[0]["title"] == "📰 Ex"
+    assert "2 posts" in embeds[0]["description"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_demand_substack_empty_when_no_publications(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    pipeline = _substack_pipeline(repos, FakeRest(), posts=[])
+    embeds = await pipeline.on_demand_substack(None)
+    assert "No recent posts" in embeds[0]["description"]
+
+
 # --- Fan-out ---
 
 

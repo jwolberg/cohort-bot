@@ -25,16 +25,24 @@ from app.tasks.queue import TaskEnqueuer
 
 logger = get_logger(__name__)
 
-SLOW_COMMANDS = {"repo", "branches", "user", "digest"}
+SLOW_COMMANDS = {"repo", "branches", "user", "digest", "substack"}
 
-# The /digest on-demand provider is registered by the digest pipeline (U9).
+# The /digest and /substack on-demand providers are registered by the digest
+# pipeline (U9 / S5).
 _digest_provider = None
+_substack_provider = None
 
 
 def set_digest_provider(provider) -> None:
     """Register the coroutine that builds on-demand /digest embeds (U9)."""
     global _digest_provider
     _digest_provider = provider
+
+
+def set_substack_provider(provider) -> None:
+    """Register the coroutine that builds on-demand /substack embeds (S5)."""
+    global _substack_provider
+    _substack_provider = provider
 _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
 SUB_COMMAND_OPTION_TYPE = 1
@@ -49,6 +57,7 @@ HELP_TEXT = (
     "`/branches owner/repo` — list branches\n"
     "`/user <user>` — recent activity for a user\n"
     "`/digest today|yesterday` — post the digest\n"
+    "`/substack [1d|7d|30d]` — recent posts from tracked publications\n"
 )
 
 
@@ -173,13 +182,21 @@ class CommandHandler:
         application_id = payload["application_id"]
         token = payload["interaction_token"]
 
-        # /digest is served by the digest pipeline (U9), which returns paginated
-        # embeds; the others build a single embed from the GitHub client.
+        # /digest and /substack are served by the digest pipeline (U9 / S5),
+        # which return ready embeds; the others build a single embed from GitHub.
         if command == "digest":
             if _digest_provider is None:
                 embeds = [responses.embed("Unavailable", description="Digest is not available yet.")]
             else:
                 embeds = await _digest_provider(sub or "today")
+            await self._rest.edit_original_response(application_id, token, embeds=embeds)
+            return
+
+        if command == "substack":
+            if _substack_provider is None:
+                embeds = [responses.embed("Unavailable", description="Substack is not available yet.")]
+            else:
+                embeds = await _substack_provider(opts.get("window"))
             await self._rest.edit_original_response(application_id, token, embeds=embeds)
             return
 

@@ -174,3 +174,35 @@ async def test_repo_followup_not_found_renders_friendly(slow_handler) -> None:
         "command": "repo", "sub": None, "options": {"repo": "no/repo"},
     })
     assert rest.edits[0]["embeds"][0]["title"] == "Not found"
+
+
+# --- /substack slow path (S5) ---
+
+
+@pytest.mark.asyncio
+async def test_substack_defers_and_enqueues_with_window(slow_handler) -> None:
+    handler, enqueuer, _ = slow_handler
+    resp = await handler.dispatch(_slash("substack", window="7d"))
+    assert resp["type"] == responses.DEFERRED_CHANNEL_MESSAGE
+    assert enqueuer.followups[0]["command"] == "substack"
+    assert enqueuer.followups[0]["options"]["window"] == "7d"
+
+
+@pytest.mark.asyncio
+async def test_substack_followup_calls_provider_and_patches(slow_handler) -> None:
+    from app.discord import handlers as handlers_module
+
+    handler, _, rest = slow_handler
+    captured = {}
+
+    async def provider(window):
+        captured["window"] = window
+        return [responses.embed("📰 Substack", description="Last 7 days")]
+
+    handlers_module.set_substack_provider(provider)
+    await handler.run_followup({
+        "application_id": "app", "interaction_token": "tok",
+        "command": "substack", "sub": None, "options": {"window": "7d"},
+    })
+    assert captured["window"] == "7d"
+    assert rest.edits[0]["embeds"][0]["title"] == "📰 Substack"

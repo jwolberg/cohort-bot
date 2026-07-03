@@ -92,6 +92,25 @@ DIGEST_COMMAND: dict[str, Any] = {
     ],
 }
 
+SUBSTACK_COMMAND: dict[str, Any] = {
+    "type": CHAT_INPUT,
+    "name": "substack",
+    "description": "Show recent posts from tracked Substack publications",
+    "options": [
+        {
+            "type": STRING,
+            "name": "window",
+            "description": "Time window (default: last 1 day)",
+            "required": False,
+            "choices": [
+                {"name": "Last 1 day", "value": "1d"},
+                {"name": "Last 7 days", "value": "7d"},
+                {"name": "Last 30 days", "value": "30d"},
+            ],
+        }
+    ],
+}
+
 HELP_COMMAND: dict[str, Any] = {
     "type": CHAT_INPUT,
     "name": "help",
@@ -104,5 +123,6 @@ COMMANDS: list[dict[str, Any]] = [
     BRANCHES_COMMAND,
     USER_COMMAND,
     DIGEST_COMMAND,
+    SUBSTACK_COMMAND,
     HELP_COMMAND,
 ]
