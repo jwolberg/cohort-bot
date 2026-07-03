@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 import respx
@@ -309,7 +311,10 @@ async def test_fanout_tolerates_enqueue_failure_no_header_dup(firestore_client) 
 async def test_on_demand_builds_batched_embeds(firestore_client) -> None:
     repos = get_repositories(firestore_client)
     await repos.tracked_users.add("jay", added_by="a")
-    _mock_user("jay", [_push_event("o/r", [("s1", "Add API endpoint")])])
+    # Stamp the event at "now" so it falls inside the on-demand "today" window
+    # regardless of the calendar date the suite runs on.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _mock_user("jay", [_push_event("o/r", [("s1", "Add API endpoint")], created_at=now)])
     _mock_repo("o/r")
     pipeline = _pipeline(repos, FakeRest())
     embeds = await pipeline.on_demand("today")
