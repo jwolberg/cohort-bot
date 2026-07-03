@@ -22,8 +22,11 @@
 
 ## Planning Assumptions
 Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
-- **A1.** `feedparser` is adopted for RSS/Atom parsing (the only net-new dependency).
-  Fallback if rejected: stdlib `xml.etree.ElementTree` (fragile across feed variants).
+- **A1. RESOLVED (2026-07-02):** parse with **stdlib + `defusedxml`** —
+  `defusedxml.ElementTree` (XML-bomb hardened), `email.utils.parsedate_to_datetime`
+  (RFC-822 dates), `html.parser` (excerpt cleaning). `defusedxml` is the only
+  net-new dependency. (`feedparser` and pure-stdlib were considered and rejected —
+  see spec Constraints.)
 - **A2.** `/substack` uses a fixed **7-day** window (no selectable option in v1).
 - **A3.** The scheduled Substack section is a **single combined message** posted to
   `digest_channel_id` after the GitHub digest header (not per-publication messages).
@@ -56,7 +59,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
 - **Overall status:** Not Started
 - **Current phase:** Phase 1 — Data Layer
 - **Current ticket:** P1-T1
-- **Blockers:** None (A1 `feedparser` decision preferably confirmed before P2-T1)
+- **Blockers:** None (A1 resolved: stdlib + `defusedxml`)
 
 ---
 
@@ -105,11 +108,14 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
     concurrency), `PostRef` dataclass `{slug, post_id, title, url, author, published:
     datetime(UTC), excerpt}`, `fetch_posts_since(feed_url, since, *, limit)`, an
     HTML→text excerpt cleaner (strip tags, unescape entities, truncate ~280), and a
-    `feed_url`/URL → slug (host) normalizer. Parse via `feedparser` (A1). Dedup key =
-    entry `id`/`guid`, fallback `link`; skip entries missing both.
-  - Modules / files: `app/substack/__init__.py`, `app/substack/client.py`; dependency
-    add in `pyproject.toml` (+ `.env.example` only if a setting is added — none expected).
-  - Depends on: none (parallelizable with P1-T1). A1 (`feedparser`) preferably confirmed.
+    `feed_url`/URL → slug (host) normalizer. Parse RSS 2.0 via
+    `defusedxml.ElementTree` (A1); dates via `email.utils.parsedate_to_datetime`;
+    excerpts via `html.parser`; cap the response byte size before parsing. Dedup
+    key = entry `guid`, fallback `link`; skip entries missing both.
+  - Modules / files: `app/substack/__init__.py`, `app/substack/client.py`; add
+    `defusedxml` to `pyproject.toml` runtime deps (+ `.env.example` only if a setting
+    is added — none expected).
+  - Depends on: none (parallelizable with P1-T1). A1 resolved (stdlib + `defusedxml`).
   - Acceptance criteria: spec AC#4, AC#8; mirrors `GitHubClient` shape (ARCH §8):
     async CM, injectable client, typed errors, best-effort per-feed skip.
   - Commit: "feat(substack): async RSS/Atom client + PostRef parser (S2)".

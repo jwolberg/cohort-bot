@@ -94,15 +94,18 @@ The feature is successful when:
 
 ### Technical
 
-- **Feed parsing:** RSS 2.0 *and* Atom, with RFC-822 and ISO-8601 date formats and
-  occasionally malformed markup. Recommend adding **`feedparser`** as a dependency —
-  it handles both formats, date normalization, and broken feeds robustly. It is
-  synchronous/CPU-bound: fetch bytes with the async `httpx` client, then parse the
-  bytes with `feedparser` (fast; wrap in `asyncio.to_thread` if needed). *Tradeoff:*
-  one new dependency vs. hand-rolling `xml.etree.ElementTree` parsing (zero-dep but
-  fragile across feed variants). **Recommendation: `feedparser`, justified per the
-  "new dependency must be justified" rule; record the decision in
-  `docs/implementation-notes.md`.**
+- **Feed parsing (DECIDED 2026-07-02 — A1: stdlib + `defusedxml`):** Substack
+  publishes well-formed **RSS 2.0**. Parse with `defusedxml.ElementTree.fromstring`
+  (XML-bomb / entity-expansion hardened — feeds are untrusted remote input, esp.
+  custom domains), normalize `pubDate` via stdlib `email.utils.parsedate_to_datetime`
+  (RFC-822 → tz-aware UTC), read `dc:creator` via the standard namespace, and clean
+  excerpts with stdlib `html.parser` (strip tags, unescape entities, truncate ~280).
+  Fetch bytes with the async `httpx` client, cap the response size, then parse.
+  *Rejected:* `feedparser` (its Atom / exotic-date / malformed-feed robustness is
+  unused at Substack-only scope and adds dependency surface against the lean-deps
+  rule); pure stdlib `xml.etree` (leaves XML-bomb defense to hand-rolled guards).
+  `defusedxml` is the one justified new dependency. Record in
+  `docs/implementation-notes.md` at P2-T1.
 - **Excerpt cleaning:** feed descriptions are HTML. Strip tags + unescape entities
   (stdlib `html` + a minimal parser/regex) and truncate (~280 chars).
 - **Firestore doc ids** cannot contain `/`; reuse the `_encode()` convention. Slug =
@@ -261,8 +264,8 @@ interactions/handlers slow path, and the digest pipeline/formatter.
 
 ## Open Questions (resolve before or during S1)
 
-1. **`feedparser` vs stdlib** — recommend `feedparser`; confirm the dependency is
-   acceptable (only real net-new dependency in the plan).
+1. ~~**`feedparser` vs stdlib**~~ — **RESOLVED 2026-07-02:** stdlib `defusedxml` +
+   `email.utils` + `html.parser`. `defusedxml` is the only net-new dependency.
 2. **`/substack` window** — fixed 7 days assumed; confirm, or expose a `window`
    option (`today|7d|30d`).
 3. **Substack section placement** — assumed a single combined message to the digest
