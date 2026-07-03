@@ -1,10 +1,12 @@
 """Async GitHub REST client with ETag caching + rate-limit backoff.
 
 Design decisions (ARCHITECTURE §8; U5 deferred question resolved):
-- **Per-user commits** are read from the public **Events API**
+- **Per-user commits** are discovered from the public **Events API**
   (``/users/{u}/events/public``): one request per user, newest-first, so we can
-  stop early once we pass the cursor. PushEvent payloads carry the SHAs/messages
-  we need. (Enumerating every repo would be far more expensive.)
+  stop early once we pass the cursor. PushEvent payloads no longer inline the
+  commit list — they carry only the ``before``/``head`` SHAs — so each push's
+  range is hydrated via the compare API. (Enumerating every repo would be far
+  more expensive.)
 - **Repo metadata** uses conditional requests: the stored ETag is sent as
   ``If-None-Match``; a ``304`` reuses the cache and does not count against the
   rate limit.
@@ -219,8 +221,10 @@ class GitHubClient:
     ) -> list[CommitRef]:
         """Return the user's push commits strictly after ``since`` (newest-first).
 
-        Uses the public Events API. Stops paging as soon as an event at/older
-        than ``since`` is seen (events are returned newest-first).
+        Uses the public Events API to find pushes, then hydrates each push's
+        commits from its ``before...head`` range (see :meth:`_commits_from_push`).
+        Stops paging as soon as an event at/older than ``since`` is seen (events
+        are returned newest-first).
         """
         commits: list[CommitRef] = []
         for page in range(1, max_pages + 1):
@@ -245,22 +249,71 @@ class GitHubClient:
                 if event.get("type") != "PushEvent":
                     continue
                 repo_name = event.get("repo", {}).get("name", "")
-                for commit in event.get("payload", {}).get("commits", []):
-                    if not commit.get("sha"):
-                        continue
-                    commits.append(
-                        CommitRef(
-                            repo=repo_name,
-                            sha=commit["sha"],
-                            message=commit.get("message", ""),
-                            author=commit.get("author", {}).get("name", username),
-                            timestamp=created or datetime.now(timezone.utc),
-                            url=f"https://github.com/{repo_name}/commit/{commit['sha']}",
-                        )
+                payload = event.get("payload", {})
+                commits.extend(
+                    await self._commits_from_push(
+                        repo_name,
+                        payload.get("before"),
+                        payload.get("head"),
+                        when=created or datetime.now(timezone.utc),
+                        username=username,
                     )
+                )
             if reached_cursor or len(events) < 100:
                 break
         return commits
+
+    async def _commits_from_push(
+        self,
+        repo: str,
+        before: str | None,
+        head: str | None,
+        *,
+        when: datetime,
+        username: str,
+    ) -> list[CommitRef]:
+        """Resolve the commits introduced by a single push.
+
+        The public Events API no longer inlines a PushEvent's commit list — the
+        payload carries only the ``before``/``head`` SHAs — so hydrate the range
+        via the compare API. A new-branch push (``before`` all-zeros) has no base
+        to compare against, so fall back to the single head commit. Best-effort:
+        a range we can't resolve (deleted/renamed repo, etc.) is skipped rather
+        than failing the whole digest. ``when`` (the push time) is used as each
+        commit's timestamp so window/cursor semantics match the event stream.
+        """
+        if not repo or not head:
+            return []
+        try:
+            if not before or set(before) == {"0"}:
+                resp = await self._request("GET", f"/repos/{repo}/commits/{head}")
+                raw = [resp.json()]
+            else:
+                resp = await self._request(
+                    "GET", f"/repos/{repo}/compare/{before}...{head}"
+                )
+                raw = resp.json().get("commits") or []
+        except GitHubError:
+            return []
+        out: list[CommitRef] = []
+        for entry in raw:
+            sha = entry.get("sha")
+            if not sha:
+                continue
+            commit = entry.get("commit") or {}
+            author = commit.get("author") or {}
+            out.append(
+                CommitRef(
+                    repo=repo,
+                    sha=sha,
+                    message=commit.get("message", ""),
+                    author=author.get("name") or username,
+                    timestamp=when,
+                    url=entry.get("html_url")
+                    or f"https://github.com/{repo}/commit/{sha}",
+                )
+            )
+        return out
 
     async def fetch_repo(self, repo: str) -> RepoInfo:
         """Fetch repo metadata using a conditional (ETag) request."""

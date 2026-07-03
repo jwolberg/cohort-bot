@@ -110,32 +110,117 @@ async def test_commits_since_boundary_is_inclusive_of_same_second() -> None:
     # SHA dedup upstream filters ones already reported. An event strictly before
     # the cursor stops pagination.
     cursor = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    # PushEvent payloads now carry only before/head; commits are hydrated via
+    # the compare API. The pre-cursor event stops paging before it is hydrated,
+    # so its compare range is never requested.
     events = [
         {
             "type": "PushEvent",
             "created_at": "2026-07-01T13:00:00Z",  # after cursor -> included
             "repo": {"name": "o/r"},
-            "payload": {"commits": [{"sha": "new1", "message": "m", "author": {"name": "Jay"}}]},
+            "payload": {"before": "b1", "head": "h1"},
         },
         {
             "type": "PushEvent",
             "created_at": "2026-07-01T12:00:00Z",  # == cursor -> included (inclusive)
             "repo": {"name": "o/r"},
-            "payload": {"commits": [{"sha": "same1", "message": "m", "author": {"name": "Jay"}}]},
+            "payload": {"before": "b2", "head": "h2"},
         },
         {
             "type": "PushEvent",
             "created_at": "2026-07-01T11:00:00Z",  # before cursor -> stops paging
             "repo": {"name": "o/r"},
-            "payload": {"commits": [{"sha": "old1", "message": "m", "author": {"name": "Jay"}}]},
+            "payload": {"before": "b3", "head": "h3"},
         },
     ]
     respx.get(f"{BASE}/users/jay/events/public").mock(
         return_value=httpx.Response(200, json=events)
     )
+    respx.get(f"{BASE}/repos/o/r/compare/b1...h1").mock(
+        return_value=httpx.Response(
+            200, json={"commits": [{"sha": "new1", "commit": {"message": "m", "author": {"name": "Jay"}}}]}
+        )
+    )
+    respx.get(f"{BASE}/repos/o/r/compare/b2...h2").mock(
+        return_value=httpx.Response(
+            200, json={"commits": [{"sha": "same1", "commit": {"message": "m", "author": {"name": "Jay"}}}]}
+        )
+    )
     async with GitHubClient("tok") as gh:
         commits = await gh.fetch_user_commits_since("jay", cursor)
     assert [c.sha for c in commits] == ["new1", "same1"]
+
+
+@respx.mock
+async def test_push_commits_hydrated_via_compare_and_new_branch_fallback() -> None:
+    # A normal push resolves its full range via compare (oldest->newest); a
+    # new-branch push (before all-zeros) has no base, so we take the head commit.
+    zero = "0" * 40
+    events = [
+        {
+            "type": "PushEvent",
+            "created_at": "2026-07-02T10:00:00Z",
+            "repo": {"name": "o/r"},
+            "payload": {"before": "aaa", "head": "bbb"},
+        },
+        {
+            "type": "PushEvent",
+            "created_at": "2026-07-02T09:00:00Z",
+            "repo": {"name": "o/r"},
+            "payload": {"before": zero, "head": "ccc"},
+        },
+    ]
+    respx.get(f"{BASE}/users/jay/events/public").mock(
+        return_value=httpx.Response(200, json=events)
+    )
+    respx.get(f"{BASE}/repos/o/r/compare/aaa...bbb").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "commits": [
+                    {"sha": "c1", "commit": {"message": "one", "author": {"name": "Jay"}}},
+                    {"sha": "c2", "commit": {"message": "two", "author": {"name": "Jay"}}},
+                ]
+            },
+        )
+    )
+    respx.get(f"{BASE}/repos/o/r/commits/ccc").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sha": "ccc",
+                "commit": {"message": "init", "author": {"name": "Jay"}},
+                "html_url": "https://github.com/o/r/commit/ccc",
+            },
+        )
+    )
+    async with GitHubClient("tok") as gh:
+        commits = await gh.fetch_user_commits_since("jay", None)
+    assert [c.sha for c in commits] == ["c1", "c2", "ccc"]
+    assert commits[0].message == "one"
+    assert commits[2].url == "https://github.com/o/r/commit/ccc"
+
+
+@respx.mock
+async def test_unresolvable_push_range_is_skipped_not_fatal() -> None:
+    # A compare that 404s (renamed/deleted repo) must not sink the whole digest.
+    events = [
+        {
+            "type": "PushEvent",
+            "created_at": "2026-07-02T10:00:00Z",
+            "repo": {"name": "o/gone"},
+            "payload": {"before": "x", "head": "y"},
+        }
+    ]
+    respx.get(f"{BASE}/users/jay/events/public").mock(
+        return_value=httpx.Response(200, json=events)
+    )
+    respx.get(f"{BASE}/repos/o/gone/compare/x...y").mock(
+        return_value=httpx.Response(404)
+    )
+    async with GitHubClient("tok") as gh:
+        commits = await gh.fetch_user_commits_since("jay", None)
+    assert commits == []
 
 
 @respx.mock
