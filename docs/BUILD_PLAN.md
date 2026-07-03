@@ -3,8 +3,8 @@
 ## Project
 - **Name:** Substack Publication Tracking (second content source for the digest bot)
 - **Summary:** Add Substack as a tracked source alongside GitHub. Publications are
-  managed in the admin panel; new posts are folded into the daily digest as a
-  Substack section and are also viewable on demand via `/substack`. Rendering is
+  managed in the admin panel; new posts are posted to the daily digest as one
+  message per publication and are also viewable on demand via `/substack`. Rendering is
   native feed excerpt only — **no LLM summarization**. Reuses the existing
   source/store/digest/admin patterns; no new secret, IAM role, queue, or scheduler.
 
@@ -27,9 +27,11 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   (RFC-822 dates), `html.parser` (excerpt cleaning). `defusedxml` is the only
   net-new dependency. (`feedparser` and pure-stdlib were considered and rejected —
   see spec Constraints.)
-- **A2.** `/substack` uses a fixed **7-day** window (no selectable option in v1).
-- **A3.** The scheduled Substack section is a **single combined message** posted to
-  `digest_channel_id` after the GitHub digest header (not per-publication messages).
+- **A2. RESOLVED (2026-07-02):** `/substack` defaults to a **1-day** window and is
+  **customizable** via a `window` option (`1d`|`7d`|`30d` choices).
+- **A3. RESOLVED (2026-07-02):** scheduled posts are **per-publication messages** —
+  one message per publication that has new posts, fanned out like GitHub's per-user
+  digest (`/tasks/digest/user`). No combined section/header. Posts to `digest_channel_id`.
 - **A4.** Publications post to the **existing** `digest_channel_id`; no new config key.
 - **A5.** A newly added publication's cursor is initialized to **add-time** so the
   back catalog is never dumped (spec Edge Cases; ARCH §7 watermark semantics).
@@ -123,38 +125,43 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
 
 ### Phase 3 — Digest Integration
 **Goal**
-- Compute a deduped Substack section and post it on the daily schedule with
-  retry-safe cursor advance; expose a no-dedup on-demand computation for `/substack`.
+- Compute a deduped per-publication section and post one message per publication on
+  the daily schedule with retry-safe cursor advance; expose a no-dedup on-demand
+  computation for `/substack`.
 
 **Exit Criteria**
-- Scheduled run enqueues one substack-check task; the worker posts only new posts and
-  advances cursors only after a successful post; on-demand computation skips dedup.
+- Scheduled run enqueues one task per enabled publication; each worker posts only that
+  publication's new posts and advances its cursor only after a successful post;
+  on-demand computation skips dedup.
 
 **Tickets**
-- **P3-T1 — Substack section compute + formatter + pipeline factory**
+- **P3-T1 — Per-publication section compute + formatter + pipeline factory**
   - Objective: Add `PublicationSection` dataclass and a
-    `compute_substack_section(client, publications, *, dedup)` method to
-    `DigestPipeline`; extend `DigestPipeline.__init__` with an injectable
-    `substack_factory` (mirroring `gh_factory`). Add `format_substack_section(...)`
-    to `app/digest/formatter.py` (title + link + cleaned excerpt; respect embed
-    limits via existing pagination). Combined single message per A3.
+    `compute_publication_section(client, publication, since, *, dedup)` method to
+    `DigestPipeline` (mirrors `compute_section`); extend `DigestPipeline.__init__`
+    with an injectable `substack_factory` (mirroring `gh_factory`). Add
+    `format_publication_section(...)` to `app/digest/formatter.py` (one embed per
+    publication: title + link + cleaned excerpt; respect embed limits via existing
+    pagination). Per-publication message per A3.
   - Modules / files: `app/digest/pipeline.py`, `app/digest/formatter.py`.
   - Depends on: P1-T1, P2-T1.
-  - Acceptance criteria: spec AC#5 (dedup filter), AC#7 (on-demand no dedup);
-    ARCH §6c section-compute pattern; rendering = native excerpt (spec Decision 2).
-  - Commit: "feat(digest): substack section compute + formatter (S3a)".
+  - Acceptance criteria: spec AC#5 (per-publication dedup filter), AC#7 (on-demand no
+    dedup); ARCH §6c section-compute pattern; rendering = native excerpt (spec
+    Decision 2).
+  - Commit: "feat(digest): per-publication section compute + formatter (S3a)".
   - Status: Todo
-- **P3-T2 — Substack scheduled worker + enqueue + wiring**
-  - Objective: Add `SUBSTACK_CHECK_PATH = "/tasks/substack/check"` and
-    `enqueue_substack_check()` to `app/tasks/queue.py` (reuse the `digest-fanout`
-    queue). Add `process_substack()` to the pipeline (post-first-then-record-then-
-    advance-cursor). `run_fanout()` also enqueues exactly one substack-check task.
-    Add the `/tasks/substack/check` route in `app/discord/interactions.py` guarded by
-    `require_oidc`, and wire the handler in `install_digest()`.
+- **P3-T2 — Per-publication scheduled worker + enqueue + wiring**
+  - Objective: Add `SUBSTACK_PUBLICATION_PATH = "/tasks/substack/publication"` and
+    `enqueue_substack_publication()` to `app/tasks/queue.py` (reuse the `digest-fanout`
+    queue). Add `process_publication(slug)` to the pipeline (post-first-then-record-
+    then-advance-cursor; mirrors `process_user`). `run_fanout()` also enqueues one
+    publication task **per enabled publication**. Add the `/tasks/substack/publication`
+    route in `app/discord/interactions.py` guarded by `require_oidc`, and wire the
+    handler in `install_digest()`.
   - Modules / files: `app/tasks/queue.py`, `app/digest/pipeline.py`,
     `app/discord/interactions.py`.
   - Depends on: P3-T1.
-  - Acceptance criteria: spec AC#5 (one task enqueued, post-first ordering), AC#6
+  - Acceptance criteria: spec AC#5 (one task per publication, post-first ordering), AC#6
     (idempotent no-op on no new posts), AC#10 (no new queue/scheduler); ARCH §6c
     (fan-out idempotency), §10 (`require_oidc`).
   - Commit: "feat(digest): substack check worker + enqueue (S3b/S4)".
@@ -171,7 +178,8 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
 **Tickets**
 - **P4-T1 — `/substack` on-demand command**
   - Objective: Add `SUBSTACK_COMMAND` to `app/discord/commands.py` (optional `window`
-    string option, default 7d per A2), append to `COMMANDS`. Add `"substack"` to
+    string option with `1d`|`7d`|`30d` choices, **default 1d** per A2), append to
+    `COMMANDS`. Add `"substack"` to
     `SLOW_COMMANDS`, a `run_followup` branch calling the on-demand (`dedup=False`)
     compute → `edit_original_response`, and update `HELP_TEXT`. Confirm
     `scripts/register_commands.py` picks up `COMMANDS`.
@@ -234,13 +242,13 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   existing. It is a leaf with no upstream dependency, is fully testable against the
   Firestore emulator in isolation, and locks the doc shapes (slug, cursor-on-add,
   `expire_at`) that P2–P4 build on. P2-T1 (client) can proceed in parallel if a
-  second worker is available and A1 (`feedparser`) is confirmed.
+  second worker is available (A1 resolved: stdlib + `defusedxml`).
 
 ## Deferred / Out of Scope
 - Claude summarization of posts (native excerpt only — spec Decision 2).
-- Separate Substack channel / per-publication messages / per-channel routing.
+- Separate Substack channel / per-channel routing (posts to `digest_channel_id`).
 - Discord command to manage tracking (admin panel only — spec Decision 3).
-- Historical archive backfill; selectable `/substack` window beyond default.
+- Historical archive backfill; `/substack` windows beyond the `1d`|`7d`|`30d` choices.
 - Full-text ingestion, comment counts, paywalled-content access, author avatars.
 - Generic (non-Substack) RSS sources — a later generalization of the client.
 

@@ -44,11 +44,13 @@
 - **Desired workflow:**
   - *Operator:* opens the admin panel → **Publications** → pastes a Substack feed or
     publication URL → it appears in the tracked list; can remove it later.
-  - *Consumer (scheduled):* in the daily digest, after the GitHub sections, sees a
-    **📰 Substack** section listing new posts since the last digest, each as
-    *Publication — "Title"* + link + a short native excerpt.
+  - *Consumer (scheduled):* in the daily digest, after the GitHub sections, sees
+    **one 📰 message per publication** that has new posts since its last cursor —
+    *📰 Publication — N new post(s)*, each post as *"Title"* + link + native excerpt.
+    Publications with nothing new post nothing (A3: per-publication fan-out).
   - *Consumer (on-demand):* runs **`/substack`** to see recent posts across all
-    tracked publications (a read-only window view, no dedup, no cursor advance).
+    tracked publications within a window (**default 1 day, customizable** via a
+    `window` option per A2); read-only, no dedup, no cursor advance.
 
 ## Success Condition
 
@@ -56,9 +58,11 @@ The feature is successful when:
 
 1. An admin can add/remove/list Substack publications via the admin panel, and the
    set persists in Firestore.
-2. The daily scheduled digest posts a Substack section containing **only posts not
-   previously reported** (correct dedup + cursor advance, retry-safe).
-3. `/substack` returns a current, correctly formatted list of recent posts on demand.
+2. The daily scheduled digest posts **one message per publication** with new posts,
+   containing **only posts not previously reported** (per-publication dedup + cursor
+   advance, retry-safe); publications with nothing new post nothing.
+3. `/substack` returns a current, correctly formatted list of recent posts on demand
+   (default 1-day window, customizable).
 4. A single broken/unreachable/malformed feed never fails the digest run or the
    command — it is skipped and logged (best-effort parity with the GitHub client).
 5. No new secret, no new IAM role, and no scraping are introduced (public feeds only).
@@ -69,9 +73,11 @@ The feature is successful when:
 
 - `app/substack/client.py` — async fetch + RSS/Atom parse → typed `PostRef` objects.
 - `TrackedPublicationsRepo` + `ProcessedPostsRepo` added to the `Repositories` bundle.
-- Digest integration: a Substack section in the scheduled fan-out (dedup + cursor)
-  and an on-demand path for `/substack` (no dedup).
-- `/tasks/substack/check` OIDC worker endpoint, enqueued once per daily run.
+- Digest integration: per-publication fan-out in the scheduled path (one message per
+  publication with new posts, dedup + cursor) and an on-demand path for `/substack`
+  (no dedup).
+- `/tasks/substack/publication` OIDC worker endpoint, enqueued once **per enabled
+  publication** per daily run (mirrors `/tasks/digest/user`).
 - `/admin/api/publications` CRUD + a Publications section in the static admin panel.
 - `SUBSTACK_COMMAND` in `commands.py`, dispatched via the existing slow-command path.
 - `deploy/setup.sh`: TTL policy on the new `processed_posts` collection.
@@ -148,8 +154,8 @@ The feature is successful when:
   `created_at`/`last_cursor` (mirror `TrackedUsersRepo.add`).
 - **Custom-domain publications** (not `*.substack.com`): accept any feed URL; derive
   slug from host. Store the resolved `feed_url` explicitly.
-- **No publications tracked:** scheduled path posts no Substack section; `/substack`
-  returns an empty-state embed.
+- **No publications tracked:** scheduled path enqueues no publication tasks;
+  `/substack` returns an empty-state embed.
 - **Timezone:** normalize all feed dates to timezone-aware UTC before cursor compares.
 
 ## Acceptance Criteria
@@ -164,14 +170,16 @@ The feature is successful when:
 4. `SubstackClient.fetch_posts_since(feed_url, since)` returns `PostRef`s strictly
    newer than `since` (or all recent, when `since` is None), newest-first, with
    title, url, author, published (UTC), post_id, and a cleaned excerpt.
-5. The scheduled digest run enqueues exactly one `/tasks/substack/check` task; the
-   worker posts a Substack section containing only posts whose id is **not** in
-   `processed_posts`, then records those ids and advances each publication's cursor —
-   **only after** the Discord post succeeds.
+5. The scheduled digest run enqueues **one `/tasks/substack/publication` task per
+   enabled publication**; each worker posts a per-publication message containing only
+   posts whose id is **not** in `processed_posts`, then records those ids and advances
+   that publication's cursor — **only after** the Discord post succeeds. A publication
+   with no new posts posts nothing and does not advance its cursor.
 6. Re-running the scheduled path with no new posts produces **no** Substack post and
-   no cursor change (idempotent).
-7. `/substack` returns recent posts across enabled publications within a fixed window
-   (default 7 days), **without** dedup or cursor advance.
+   no cursor change (idempotent, per publication).
+7. `/substack` returns recent posts across enabled publications within a window that
+   **defaults to 1 day and is customizable** via a `window` option, **without** dedup
+   or cursor advance.
 8. A feed that 404s / times out / returns invalid XML is skipped with a logged
    warning; other publications still process.
 9. `processed_posts` docs carry `expire_at` and are covered by a TTL policy created in
@@ -190,19 +198,21 @@ summarizer. Suggested build units (one commit each, per repo convention):
 - **S2 — Client.** `app/substack/client.py`: `SubstackClient` (async CM, injectable
   httpx client, typed `SubstackError`/`NotFoundError`), `PostRef` dataclass,
   `fetch_posts_since(feed_url, since, *, limit=...)`, excerpt cleaner, URL→slug
-  normalization helper. `feedparser` dependency (see Constraints). Tests via `respx`
-  against feed fixtures (RSS + Atom + malformed).
+  normalization helper. Parse via `defusedxml` + `email.utils` + `html.parser` (A1,
+  see Constraints). Tests via `respx` against feed fixtures (RSS + malformed).
 - **S3 — Digest integration.** Add `PublicationSection` dataclass and
-  `compute_substack_section(client, since_by_pub, *, dedup)` to
+  `compute_publication_section(client, publication, since, *, dedup)` to
   `app/digest/pipeline.py`; extend `DigestPipeline.__init__` with a
   `substack_factory` (mirroring `gh_factory`). `run_fanout()` also enqueues one
-  substack-check task; new `process_substack()` implements post-first-then-record.
-  Formatter: `format_substack_section(...)` in `app/digest/formatter.py`. Tests in
-  `test_digest_pipeline.py` with fakes.
-- **S4 — Worker + enqueue.** `SUBSTACK_CHECK_PATH = "/tasks/substack/check"` and
-  `enqueue_substack_check()` in `app/tasks/queue.py` (reuse the `digest-fanout`
-  queue); route in `app/discord/interactions.py` guarded by `require_oidc`; wire the
-  handler in `install_digest()`.
+  publication task **per enabled publication**; new `process_publication(slug)`
+  implements post-first-then-record-then-cursor (mirrors `process_user`). Formatter:
+  `format_publication_section(...)` in `app/digest/formatter.py` (one embed per
+  publication). Tests in `test_digest_pipeline.py` with fakes.
+- **S4 — Worker + enqueue.** `SUBSTACK_PUBLICATION_PATH =
+  "/tasks/substack/publication"` and `enqueue_substack_publication()` in
+  `app/tasks/queue.py` (reuse the `digest-fanout` queue); route in
+  `app/discord/interactions.py` guarded by `require_oidc`; wire the handler in
+  `install_digest()`.
 - **S5 — `/substack` command.** `SUBSTACK_COMMAND` (optional `window` string option)
   in `app/discord/commands.py`, appended to `COMMANDS`; add `"substack"` to
   `SLOW_COMMANDS` and a `run_followup` branch calling the on-demand
@@ -235,14 +245,14 @@ interactions/handlers slow path, and the digest pipeline/formatter.
 - `app/digest/pipeline.py` (section compute, `substack_factory`, worker handler, wiring)
 - `app/digest/formatter.py` (substack section formatter)
 - `app/tasks/queue.py` (path const + `enqueue_substack_check`)
-- `app/discord/interactions.py` (new `/tasks/substack/check` route + handler setter)
+- `app/discord/interactions.py` (new `/tasks/substack/publication` route + handler setter)
 - `app/discord/commands.py` (`SUBSTACK_COMMAND`)
 - `app/discord/handlers.py` (`SLOW_COMMANDS`, `run_followup` branch, `HELP_TEXT`)
 - `app/admin/api.py` (publications CRUD)
 - `app/admin/static/index.html` (Publications UI)
 - `deploy/setup.sh` (TTL for `processed_posts`)
 - `scripts/register_commands.py` (auto-picks up `COMMANDS`; verify)
-- `pyproject.toml` / requirements (`feedparser`, if adopted)
+- `pyproject.toml` / requirements (`defusedxml` — the one net-new dependency)
 - `tests/test_repositories.py`, `tests/test_digest_pipeline.py`, `tests/test_admin_api.py`
 - `docs/PRD.md`, `docs/ARCHITECTURE.md`, `docs/implementation-notes.md`
 
@@ -259,14 +269,15 @@ interactions/handlers slow path, and the digest pipeline/formatter.
   auth rejection (including the unsigned-IAP-email regression).
 - **Lint + full test suite** before each S# commit (repo convention).
 - **Manual e2e (staging):** add a real public Substack feed via the panel, trigger a
-  digest run (admin "test digest" analog), confirm a correctly deduped Substack
-  section posts; run `/substack`; confirm a second run with no new posts is silent.
+  digest run (admin "test digest" analog), confirm a correctly deduped per-publication
+  message posts; run `/substack`; confirm a second run with no new posts is silent.
 
 ## Open Questions (resolve before or during S1)
 
 1. ~~**`feedparser` vs stdlib**~~ — **RESOLVED 2026-07-02:** stdlib `defusedxml` +
    `email.utils` + `html.parser`. `defusedxml` is the only net-new dependency.
-2. **`/substack` window** — fixed 7 days assumed; confirm, or expose a `window`
-   option (`today|7d|30d`).
-3. **Substack section placement** — assumed a single combined message to the digest
-   channel *after* the GitHub header. Confirm vs. per-publication messages.
+2. ~~**`/substack` window**~~ — **RESOLVED 2026-07-02 (A2):** default **1 day**,
+   **customizable** via a `window` option (e.g. `1d`|`7d`|`30d` choices).
+3. ~~**Substack section placement**~~ — **RESOLVED 2026-07-02 (A3):**
+   **per-publication messages** (one message per publication with new posts), fanned
+   out like GitHub's per-user digest. No separate combined section/header.
