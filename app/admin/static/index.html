@@ -43,6 +43,28 @@
       </ul>
     </section>
 
+    <!-- Substack publications -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-3">Substack publications</h2>
+      <form @submit.prevent="addPublication()" class="flex gap-2 mb-3">
+        <input x-model="newFeed" placeholder="publication.substack.com or feed URL"
+               class="flex-1 border rounded px-3 py-2 text-sm" />
+        <button class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Add</button>
+      </form>
+      <ul class="divide-y">
+        <template x-for="p in publications" :key="p.slug">
+          <li class="flex items-center justify-between py-2">
+            <span class="text-sm">
+              <span x-text="p.title || p.slug" class="font-medium"></span>
+              <span x-text="p.slug" class="font-mono text-slate-400 ml-2"></span>
+            </span>
+            <button @click="removePublication(p.slug)" class="text-red-600 text-sm">Remove</button>
+          </li>
+        </template>
+        <li x-show="publications.length === 0" class="py-2 text-sm text-slate-400">No tracked publications.</li>
+      </ul>
+    </section>
+
     <!-- Config -->
     <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
       <h2 class="text-lg font-medium mb-3">Digest config</h2>
@@ -72,11 +94,12 @@
   <script>
     function admin() {
       return {
-        token: '', users: [], config: {}, adminRoles: '',
-        newUser: '', error: '', notice: '',
+        token: '', users: [], publications: [], config: {}, adminRoles: '',
+        newUser: '', newFeed: '', error: '', notice: '',
         init() {
           this.token = localStorage.getItem('adminToken') || '';
           this.loadUsers();
+          this.loadPublications();
           this.loadConfig();
         },
         save() { localStorage.setItem('adminToken', this.token); },
@@ -109,6 +132,16 @@
         },
         async removeUser(username) {
           try { await this.api('DELETE', '/users/' + encodeURIComponent(username)); this.loadUsers(); } catch (e) {}
+        },
+        async loadPublications() {
+          try { this.publications = (await this.api('GET', '/publications')).publications; } catch (e) {}
+        },
+        async addPublication() {
+          if (!this.newFeed) return;
+          try { await this.api('POST', '/publications', { feed_url: this.newFeed }); this.newFeed = ''; this.loadPublications(); } catch (e) {}
+        },
+        async removePublication(slug) {
+          try { await this.api('DELETE', '/publications/' + encodeURIComponent(slug)); this.loadPublications(); } catch (e) {}
         },
         async saveConfig() {
           const roles = this.adminRoles.split(',').map(s => s.trim()).filter(Boolean);

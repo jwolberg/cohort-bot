@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -20,6 +21,7 @@ from google.oauth2 import id_token
 
 from app.config import Settings, get_settings
 from app.store.repositories import Repositories, get_repositories
+from app.substack.client import slug_for
 from app.tasks.queue import TaskEnqueuer
 
 router = APIRouter(prefix="/admin")
@@ -113,6 +115,57 @@ async def put_config(
 async def test_digest(enqueuer: TaskEnqueuer = Depends(get_enqueuer)) -> dict[str, Any]:
     task_name = await enqueuer.enqueue_digest_run({"source": "admin-test"})
     return {"status": "enqueued", "task": task_name}
+
+
+def _normalize_feed_url(raw: str) -> str:
+    """Normalize a pasted Substack feed *or* publication URL to its RSS feed URL.
+
+    Accepts ``pragmaticengineer.substack.com``, ``https://…substack.com`` or the
+    ``/feed`` URL; returns ``https://<host>/feed``. Empty/hostless input → "".
+    """
+    url = raw.strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/feed"
+
+
+@router.get("/api/publications", dependencies=[Depends(require_admin)])
+async def list_publications(repos: Repositories = Depends(get_repos)) -> dict[str, Any]:
+    pubs = await repos.tracked_publications.list_enabled()
+    return {
+        "publications": [
+            {"slug": p["slug"], "feed_url": p.get("feed_url", ""), "title": p.get("title", "")}
+            for p in pubs
+        ]
+    }
+
+
+@router.post("/api/publications", dependencies=[Depends(require_admin)])
+async def add_publication(
+    payload: dict[str, Any] = Body(...), repos: Repositories = Depends(get_repos)
+) -> dict[str, Any]:
+    feed_url = _normalize_feed_url(payload.get("feed_url") or "")
+    if not feed_url:
+        raise HTTPException(status_code=400, detail="feed_url required")
+    slug = slug_for(feed_url)
+    if not slug:
+        raise HTTPException(status_code=400, detail="could not derive a slug from feed_url")
+    title = (payload.get("title") or "").strip()
+    await repos.tracked_publications.add(slug, feed_url, title=title, added_by="admin-panel")
+    return {"status": "ok", "slug": slug, "feed_url": feed_url}
+
+
+@router.delete("/api/publications/{slug}", dependencies=[Depends(require_admin)])
+async def remove_publication(
+    slug: str, repos: Repositories = Depends(get_repos)
+) -> dict[str, Any]:
+    await repos.tracked_publications.remove(slug)
+    return {"status": "ok", "slug": slug}
 
 
 @router.get("/", include_in_schema=False)

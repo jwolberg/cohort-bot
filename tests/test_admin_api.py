@@ -125,6 +125,39 @@ async def test_config_get_and_put(wired) -> None:
     assert got["admin_role_ids"] == ["r1"]
 
 
+async def test_publications_crud_and_normalization(wired) -> None:
+    app, repos, _ = wired
+    async with _ac(app) as ac:
+        # A bare host is normalized to the /feed URL; slug is the host.
+        resp = await ac.post(
+            "/admin/api/publications", json={"feed_url": "pragmaticengineer.substack.com"}, headers=AUTH
+        )
+        assert resp.status_code == 200
+        assert resp.json()["slug"] == "pragmaticengineer.substack.com"
+        assert resp.json()["feed_url"] == "https://pragmaticengineer.substack.com/feed"
+
+        listed = (await ac.get("/admin/api/publications", headers=AUTH)).json()["publications"]
+        assert listed[0]["slug"] == "pragmaticengineer.substack.com"
+
+        assert (
+            await ac.delete("/admin/api/publications/pragmaticengineer.substack.com", headers=AUTH)
+        ).status_code == 200
+        assert (await ac.get("/admin/api/publications", headers=AUTH)).json()["publications"] == []
+
+
+async def test_add_publication_requires_feed_url(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        resp = await ac.post("/admin/api/publications", json={"feed_url": ""}, headers=AUTH)
+    assert resp.status_code == 400
+
+
+async def test_publications_endpoint_requires_admin(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        assert (await ac.get("/admin/api/publications")).status_code == 401
+
+
 async def test_digest_test_enqueues_run(wired) -> None:
     app, _, enqueuer = wired
     async with _ac(app) as ac:
@@ -141,3 +174,4 @@ async def test_static_panel_serves_required_elements() -> None:
     body = resp.text
     assert "x-data" in body
     assert "/admin/api" in body
+    assert "Substack publications" in body  # publications section present
