@@ -86,6 +86,77 @@ async def test_list_enabled_empty_returns_empty_not_error(repos) -> None:
     assert await repos.tracked_users.list_enabled() == []
 
 
+# --- Substack: tracked_publications + processed_posts (S1) ---
+
+
+async def test_add_publication_appears_in_list_enabled(repos) -> None:
+    await repos.tracked_publications.add(
+        "pragmaticengineer.substack.com",
+        "https://pragmaticengineer.substack.com/feed",
+        title="The Pragmatic Engineer",
+        added_by="admin-panel",
+    )
+    enabled = await repos.tracked_publications.list_enabled()
+    assert [p["slug"] for p in enabled] == ["pragmaticengineer.substack.com"]
+    assert enabled[0]["title"] == "The Pragmatic Engineer"
+
+
+async def test_publication_add_initializes_cursor_to_add_time(repos) -> None:
+    # A5: cursor is set on add so the back catalog is never dumped.
+    await repos.tracked_publications.add(
+        "x.substack.com", "https://x.substack.com/feed", added_by="admin"
+    )
+    cursor = await repos.tracked_publications.get_cursor("x.substack.com")
+    assert isinstance(cursor, datetime)
+
+
+async def test_publication_reAdd_is_idempotent_preserving_cursor(repos) -> None:
+    await repos.tracked_publications.add(
+        "x.substack.com", "https://x.substack.com/feed", added_by="admin#1"
+    )
+    original = await repos.tracked_publications.get_cursor("x.substack.com")
+    await repos.tracked_publications.add(
+        "x.substack.com", "https://x.substack.com/feed", added_by="admin#2"
+    )
+    enabled = await repos.tracked_publications.list_enabled()
+    assert len(enabled) == 1
+    # created_at/last_cursor are preserved across a re-add.
+    assert await repos.tracked_publications.get_cursor("x.substack.com") == original
+
+
+async def test_remove_publication_excludes_from_list_enabled(repos) -> None:
+    await repos.tracked_publications.add("a.substack.com", "https://a.substack.com/feed", added_by="a")
+    await repos.tracked_publications.add("b.substack.com", "https://b.substack.com/feed", added_by="a")
+    await repos.tracked_publications.remove("a.substack.com")
+    enabled = await repos.tracked_publications.list_enabled()
+    assert [p["slug"] for p in enabled] == ["b.substack.com"]
+
+
+async def test_publication_cursor_round_trips(repos) -> None:
+    await repos.tracked_publications.add("x.substack.com", "https://x.substack.com/feed", added_by="a")
+    cursor = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+    await repos.tracked_publications.set_cursor("x.substack.com", cursor)
+    assert await repos.tracked_publications.get_cursor("x.substack.com") == cursor
+
+
+async def test_record_and_check_posts(repos) -> None:
+    slug = "x.substack.com"
+    # post ids are often URLs/guids containing "/".
+    p1 = "https://x.substack.com/p/first-post"
+    p2 = "https://x.substack.com/p/second-post"
+    await repos.processed_posts.record_posts(slug, [p1, p2])
+    assert await repos.processed_posts.has_post(slug, p1) is True
+    assert await repos.processed_posts.has_post(slug, p2) is True
+    assert await repos.processed_posts.has_post(slug, "https://x.substack.com/p/unseen") is False
+    # Same post id under a different publication does not collide.
+    assert await repos.processed_posts.has_post("other.substack.com", p1) is False
+
+
+async def test_record_posts_empty_is_noop(repos) -> None:
+    await repos.processed_posts.record_posts("x.substack.com", [])
+    assert await repos.processed_posts.has_post("x.substack.com", "p") is False
+
+
 async def test_config_defaults_then_update(repos) -> None:
     # Missing config returns defaults.
     config = await repos.config.get()

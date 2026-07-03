@@ -1,13 +1,16 @@
-"""Data access for the four Firestore collections (ARCHITECTURE §7).
+"""Data access for the Firestore collections (ARCHITECTURE §7).
 
 Collections:
-- ``tracked_users/{username}``     — who we follow, per-user cursor watermark
-- ``processed_commits/{repo__sha}``— dedup key, ~90d TTL
-- ``repo_cache/{owner__repo}``     — GitHub ETag + metadata cache
-- ``config/singleton``             — digest channel/hour, admin role ids
+- ``tracked_users/{username}``        — who we follow, per-user cursor watermark
+- ``processed_commits/{repo__sha}``   — commit dedup key, ~90d TTL
+- ``repo_cache/{owner__repo}``        — GitHub ETag + metadata cache
+- ``config/singleton``                — digest channel/hour, admin role ids
+- ``tracked_publications/{slug}``     — Substack feeds we follow, per-feed cursor
+- ``processed_posts/{slug@post_id}``  — post dedup key, ~90d TTL
 
-Firestore document ids cannot contain ``/``, so ``owner/repo`` is encoded as
-``owner__repo`` in ids (the logical key is preserved in the ``repo`` field).
+Firestore document ids cannot contain ``/``, so ``owner/repo`` (and post ids /
+guids, which are often URLs) are encoded via :func:`_encode` (the logical key is
+preserved in a document field).
 """
 
 from __future__ import annotations
@@ -169,6 +172,107 @@ class ConfigRepo:
         await self._doc.set(fields, merge=True)
 
 
+class TrackedPublicationsRepo:
+    """CRUD + cursor management for tracked Substack publications.
+
+    Doc id is the ``slug`` (feed host, e.g. ``pragmaticengineer.substack.com``).
+    Mirrors :class:`TrackedUsersRepo`; the one difference is that a newly added
+    publication's cursor is initialized to the add time (server timestamp) so the
+    scheduled digest reports only posts published *after* it was added, never the
+    entire back catalog (spec Edge Cases / A5).
+    """
+
+    COLLECTION = "tracked_publications"
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._col = client.collection(self.COLLECTION)
+
+    async def add(self, slug: str, feed_url: str, *, title: str = "", added_by: str) -> None:
+        """Add a publication, or re-enable an existing one. Idempotent.
+
+        A re-add re-enables and preserves ``created_at``/``last_cursor`` (so the
+        back catalog is never re-reported); it refreshes ``feed_url``/``title``.
+        """
+        doc = self._col.document(slug)
+        snapshot = await doc.get()
+        if snapshot.exists:
+            await doc.set({"enabled": True, "feed_url": feed_url, "title": title}, merge=True)
+            return
+        await doc.set(
+            {
+                "slug": slug,
+                "feed_url": feed_url,
+                "title": title,
+                "enabled": True,
+                "added_by": added_by,
+                "created_at": SERVER_TIMESTAMP,
+                # Cursor = add time: only posts after this are ever reported.
+                "last_cursor": SERVER_TIMESTAMP,
+            }
+        )
+
+    async def remove(self, slug: str) -> None:
+        await self._col.document(slug).delete()
+
+    async def get(self, slug: str) -> dict[str, Any] | None:
+        snapshot = await self._col.document(slug).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
+    async def list_enabled(self) -> list[dict[str, Any]]:
+        query = self._col.where(filter=FieldFilter("enabled", "==", True))
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def list_all(self) -> list[dict[str, Any]]:
+        return [doc.to_dict() async for doc in self._col.stream()]
+
+    async def set_cursor(self, slug: str, cursor: datetime) -> None:
+        await self._col.document(slug).set({"last_cursor": cursor}, merge=True)
+
+    async def get_cursor(self, slug: str) -> datetime | None:
+        snapshot = await self._col.document(slug).get()
+        if not snapshot.exists:
+            return None
+        return snapshot.to_dict().get("last_cursor")
+
+
+class ProcessedPostsRepo:
+    """Substack-post dedup keyed by ``slug@post_id`` (~90d TTL)."""
+
+    COLLECTION = "processed_posts"
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._client = client
+        self._col = client.collection(self.COLLECTION)
+
+    @staticmethod
+    def doc_id(slug: str, post_id: str) -> str:
+        # post_id is a feed guid/link and often contains ``/`` — encode both.
+        return f"{_encode(slug)}@{_encode(post_id)}"
+
+    async def has_post(self, slug: str, post_id: str) -> bool:
+        snapshot = await self._col.document(self.doc_id(slug, post_id)).get()
+        return snapshot.exists
+
+    async def record_posts(self, slug: str, post_ids: Iterable[str]) -> None:
+        """Record processed post ids for a publication in a single batch."""
+        post_ids = list(post_ids)
+        if not post_ids:
+            return
+        expire_at = _now() + timedelta(days=PROCESSED_TTL_DAYS)
+        batch = self._client.batch()
+        for post_id in post_ids:
+            batch.set(
+                self._col.document(self.doc_id(slug, post_id)),
+                {
+                    "slug": slug,
+                    "post_id": post_id,
+                    "processed_at": SERVER_TIMESTAMP,
+                    "expire_at": expire_at,
+                },
+            )
+        await batch.commit()
+
+
 @dataclass(frozen=True)
 class Repositories:
     """Bundle of all repositories over one client (shared by /track + admin)."""
@@ -177,6 +281,8 @@ class Repositories:
     processed_commits: ProcessedCommitsRepo
     repo_cache: RepoCacheRepo
     config: ConfigRepo
+    tracked_publications: TrackedPublicationsRepo
+    processed_posts: ProcessedPostsRepo
 
 
 def get_repositories(client: AsyncClient | None = None) -> Repositories:
@@ -187,4 +293,6 @@ def get_repositories(client: AsyncClient | None = None) -> Repositories:
         processed_commits=ProcessedCommitsRepo(client),
         repo_cache=RepoCacheRepo(client),
         config=ConfigRepo(client),
+        tracked_publications=TrackedPublicationsRepo(client),
+        processed_posts=ProcessedPostsRepo(client),
     )
