@@ -226,6 +226,7 @@ Example:
 - `/digest today`
 - `/digest yesterday`
 - `/user <github_user>`
+- `/substack [1d|7d|30d]` — recent posts from tracked Substack publications (read-only; default 1-day window)
 
 ### Repository
 
@@ -274,35 +275,42 @@ Summarize:
 - pull requests
 - reviews
 
-## Stretch Goal
+## Newsletter Intelligence (Substack) — Implemented
 
-### Newsletter Intelligence
+Substack is the first additional content source alongside GitHub, proving the
+"extensible architecture for additional content sources" goal. Publications
+expose public RSS feeds (`https://<publication>.substack.com/feed`), so no auth
+or scraping is needed. See `docs/spec.md` for the full feature spec and
+`docs/implementation.md` for the build.
 
-Allow administrators to subscribe to selected Substack publications.
+**As shipped (differs from the original stretch-goal sketch):**
 
-- `/substack add <feed>`
-- `/substack remove`
-- `/substack list`
+- **Management is admin-panel only** — the **Publications** section of `/admin/*`
+  (`/admin/api/publications` CRUD). There is **no** `/substack add|remove|list`
+  Discord command; `/substack` is a read-only on-demand view with a `window`
+  option (`1d`|`7d`|`30d`, default 1 day).
+- **Rendering is the native feed excerpt** (title + link + the feed's own
+  description), **not** an AI/LLM summary — zero added inference cost.
+- **Delivery:** the daily digest posts **one 📰 message per publication** that has
+  new posts (fanned out like the per-user GitHub digest, to the same
+  `digest_channel_id`); publications with nothing new post nothing. Same daily
+  schedule — no new scheduler, queue, secret, or IAM role.
 
-Daily digest includes concise AI summaries of new posts.
-
-Example:
+Example (per-publication message):
 
 ```
-Substack Highlights
+📰 The Pragmatic Engineer — 2 new posts
 
-The Pragmatic Engineer
+"How AI coding assistants are evolving"
+The shift from code generation toward workflow automation… https://…/p/ai-assistants
 
-• AI coding assistants are shifting toward workflow automation rather than code generation.
-• Enterprise adoption continues to accelerate.
-
-Stratechery
-
-• New analysis of AI infrastructure economics.
-• GPU demand remains supply constrained.
+"Enterprise adoption patterns"
+A look at how large orgs are rolling out… https://…/p/enterprise
 ```
 
-Future enhancements could include topic tagging, semantic search across archived articles, and cross-referencing newsletter topics with tracked GitHub activity to identify emerging engineering trends.
+Future enhancements could include topic tagging, semantic search across archived
+articles, generic (non-Substack) RSS sources, and cross-referencing newsletter
+topics with tracked GitHub activity to surface emerging engineering trends.
 
 ## Success Metrics
 

@@ -84,7 +84,7 @@
 - **P3-T2** — Complete — worker + enqueue + fan-out + OIDC route + tests.
 - **P4-T1** — Complete — `/substack` command + on-demand path + tests.
 - **P4-T2** — Complete — admin CRUD + panel + tests.
-- **P5-T1** — In Progress — `processed_posts` TTL added to `setup.sh`; **remaining:** update `docs/PRD.md` and `docs/ARCHITECTURE.md` (§5 commands, §7 collections) to document the Substack source.
+- **P5-T1** — Complete — `processed_posts` TTL in `setup.sh`; `docs/PRD.md` (Newsletter Intelligence → Implemented) and `docs/ARCHITECTURE.md` (§6b/§6c flows, §7 collections) updated to document the shipped Substack source.
 
 ---
 
@@ -98,7 +98,7 @@
 ---
 
 ## Open Issues
-- **Docs:** PRD/ARCHITECTURE updates for the Substack source are still pending (P5-T1 remainder).
+- **Discord command registration:** `/substack` is deployed server-side but must be registered with Discord (`scripts/register_commands.py`, needs the live bot token) before it appears to users. The admin panel and scheduled digest work without it.
 - **Custom-domain feeds** whose RSS is not at `/feed` are not supported (spec scope: Substack-style feeds only).
 - **Publication title** is only populated if provided on add; otherwise rendering falls back to the slug. A best-effort channel-title fetch was deliberately deferred.
 - **Heartbeat SLO:** `run_fanout` still emits the heartbeat only when the GitHub header posts (channel + users present). A publications-only deployment (no tracked users) would enqueue Substack tasks but emit no heartbeat — acceptable for v1 since GitHub is the primary source; revisit if Substack-only becomes a real config.
@@ -107,8 +107,8 @@
 ---
 
 ## BUILD_PLAN Update
-- **Current phase:** Phase 5 — Deploy & Docs.
-- **Current ticket:** P5-T1 (In Progress).
-- **Updated ticket status:** P1-T1…P4-T2 = Complete; P5-T1 = In Progress (TTL done; PRD/ARCHITECTURE pending).
-- **Blockers:** None.
-- **Recommended next ticket:** finish P5-T1 — document the Substack source in `docs/PRD.md` and `docs/ARCHITECTURE.md`, then close the feature.
+- **Current phase:** Phase 5 — Deploy & Docs (done).
+- **Current ticket:** — (all Complete).
+- **Updated ticket status:** P1-T1…P5-T1 = Complete.
+- **Blockers:** None. Manual follow-up: register `/substack` with Discord.
+- **Recommended next step:** run `scripts/register_commands.py` so `/substack` appears to users; optionally add a real publication via the panel and confirm the next digest posts a per-publication message.

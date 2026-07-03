@@ -39,9 +39,16 @@ doc updates still pending.
   only). `title` is optional on add and falls back to the slug in rendering — a
   best-effort channel-title fetch was deliberately skipped to avoid an extra
   add-time network dependency and keep the client surface small.
-- **S7 deploy/docs:** `deploy/setup.sh` now enables the `processed_posts`
-  `expire_at` TTL (AC#9). **Follow-up:** `docs/PRD.md` + `docs/ARCHITECTURE.md`
-  (§5 commands, §7 collections) still need the Substack source documented.
+- **S7 deploy/docs:** `deploy/setup.sh` enables the `processed_posts`
+  `expire_at` TTL (AC#9). `docs/PRD.md` (Newsletter Intelligence → marked
+  Implemented, corrected to admin-panel management + native excerpt; `/substack`
+  added to Slash Commands) and `docs/ARCHITECTURE.md` (§6b/§6c flows, §7
+  collections: `tracked_publications` + `processed_posts`) updated to match the
+  shipped feature.
+- **Deployed:** production revision `digest-bot-00008-g8g` (image `:4cc6bb2`),
+  2026-07-03. `/tasks/substack/publication` + `/admin/api/publications` verified
+  live. **Manual step remaining:** register the `/substack` slash command with
+  Discord via `scripts/register_commands.py` (needs the live Discord token).
 
 ## 2026-07-03 — Digest signal filtering (chores/docs/fixes excluded)
 

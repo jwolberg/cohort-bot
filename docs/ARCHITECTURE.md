@@ -135,22 +135,27 @@ the PRD.
 3. Handle `PING` → `PONG`; otherwise read from Firestore and return an
    immediate embed (well under the 3s ACK deadline).
 
-### 6b. Slash command (slow path — `/repo`, `/branches`, `/user`, `/digest`)
+### 6b. Slash command (slow path — `/repo`, `/branches`, `/user`, `/digest`, `/substack`)
 1. Verify + immediately return **deferred** response (`type 5`) to beat the 3s
    deadline.
 2. Enqueue a **Cloud Task** to `/tasks/followup` with the interaction token.
-3. Task worker calls GitHub (+ LLM if needed), then PATCHes the follow-up
-   webhook with the final embed. Interaction tokens are valid ~15 min.
+3. Task worker calls GitHub (+ LLM if needed) — or, for `/substack`, fetches the
+   tracked feeds (no LLM) — then PATCHes the follow-up webhook with the final
+   embed. Interaction tokens are valid ~15 min.
 
 ### 6c. Daily digest
 1. Cloud Scheduler → `POST /tasks/digest/run`.
-2. Handler loads enabled `tracked_users`, enqueues one Cloud Task per user to
-   `/tasks/digest/user` (fan-out for parallelism + isolated retries).
+2. Handler loads enabled `tracked_users` **and** enabled `tracked_publications`,
+   enqueuing one Cloud Task per user to `/tasks/digest/user` **and** one per
+   publication to `/tasks/substack/publication` (fan-out for parallelism +
+   isolated retries; both reuse the `digest-fanout` queue).
 3. Each user task: fetch events/commits since last cursor → filter out SHAs in
    `processed_commits` → summarize via Claude → write results.
-4. A final task (or the run handler after fan-out) assembles per-user sections
-   into the channel digest and posts via Discord REST.
-5. Record new SHAs in `processed_commits` and advance the per-user cursor
+   Each publication task: fetch the RSS feed since its cursor → filter out post
+   ids in `processed_posts` → render the **native excerpt** (no LLM).
+4. Each task posts its section (per-user embed / per-publication 📰 message) to
+   `digest_channel_id` via Discord REST.
+5. Record new SHAs / post ids and advance the per-user / per-publication cursor
    **only after** a successful post (idempotent → recovers after downtime).
 
 ---
@@ -193,6 +198,21 @@ config/{singleton}
   digest_channel_id: string
   digest_hour_utc: int
   admin_role_ids: [string]
+
+tracked_publications/{slug}     # doc id = feed host, e.g. "x.substack.com"
+  slug: string
+  feed_url: string
+  title: string
+  enabled: bool
+  added_by: string
+  created_at: timestamp
+  last_cursor: timestamp        # init = add time (never dumps the back catalog)
+
+processed_posts/{slug@post_id}  # doc id = "slug@<encoded guid/link>" (dedup key)
+  slug: string
+  post_id: string
+  processed_at: timestamp
+  # TTL policy on expire_at: auto-expire after ~90d to bound growth
 ```
 
 Indexes: single-field indexes cover the MVP queries (`enabled == true`,

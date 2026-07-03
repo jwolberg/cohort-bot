@@ -58,12 +58,14 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   management command; no historical backfill; no generic (non-Substack) RSS.
 
 ## Current Status
-- **Overall status:** Implemented (feature complete; docs follow-up pending)
-- **Current phase:** Phase 5 — Deploy & Docs
-- **Current ticket:** P5-T1 (In Progress — TTL done, PRD/ARCHITECTURE pending)
-- **Blockers:** None
-- **Validation:** full suite green (139 passed); app boots with the new
-  `/tasks/substack/publication` route, `/substack` command, and providers wired.
+- **Overall status:** Complete — deployed to production (rev `digest-bot-00008-g8g`,
+  image `:4cc6bb2`, 2026-07-03).
+- **Current phase:** Phase 5 — Deploy & Docs (done)
+- **Current ticket:** — (all tickets Complete)
+- **Blockers:** None. **Manual follow-up:** register the `/substack` slash command
+  with Discord (`scripts/register_commands.py`) for it to appear to users.
+- **Validation:** full suite green (139 passed); production serves
+  `/tasks/substack/publication` (OIDC) and `/admin/api/publications` (admin).
 
 ---
 
@@ -224,7 +226,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   - Depends on: P1-T1 (collection name), and ideally P3/P4 landed (accurate docs).
   - Acceptance criteria: spec AC#9, AC#10; ARCH §7 TTL convention.
   - Commit: "chore(deploy): processed_posts TTL + docs (S7)".
-  - Status: In Progress (TTL done; PRD/ARCHITECTURE updates pending)
+  - Status: Complete
 
 ---
 
