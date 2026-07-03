@@ -27,7 +27,11 @@ DIGEST_HOUR_UTC="${DIGEST_HOUR_UTC:-13}"
 # and the OIDC audience. Deploy once (Cloud Build) to learn it, then re-run.
 SERVICE_URL="${SERVICE_URL:-}"
 
-gcloud config set project "${PROJECT_ID}" >/dev/null
+# Pin the project per-process via the env var rather than the shared, mutable
+# `gcloud config set project`. The global config can be flipped by a concurrent
+# gcloud process mid-run, which would silently redirect commands to the wrong
+# project; CLOUDSDK_CORE_PROJECT is process-local and takes precedence.
+export CLOUDSDK_CORE_PROJECT="${PROJECT_ID}"
 
 echo "==> Enabling APIs"
 gcloud services enable \
@@ -57,6 +61,16 @@ for role in \
     --member="serviceAccount:${SA_EMAIL}" --role="${role}" \
     --condition=None >/dev/null
 done
+
+# The SA enqueues Cloud Tasks that carry an OIDC token minted for *itself*
+# (oidc_token.service_account_email = digest-bot-sa). Creating such a task
+# requires iam.serviceAccounts.actAs on that SA, i.e. the SA needs
+# roles/iam.serviceAccountUser on itself — otherwise create_task returns
+# PERMISSION_DENIED and every deferred slow command fails to enqueue.
+echo "==> Allow ${SA_NAME} to actAs itself (OIDC task tokens)"
+gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+  --member="serviceAccount:${SA_EMAIL}" --role="roles/iam.serviceAccountUser" \
+  --project "${PROJECT_ID}" >/dev/null
 
 echo "==> Artifact Registry repo ${REPO}"
 if ! gcloud artifacts repositories describe "${REPO}" --location="${REGION}" >/dev/null 2>&1; then

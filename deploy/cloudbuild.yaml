@@ -10,9 +10,13 @@ substitutions:
   _REPO: digest-bot
   _SERVICE: digest-bot
   _SERVICE_ACCOUNT: digest-bot-sa
+  # Image tag. The built-in $SHORT_SHA is only populated for trigger-based
+  # builds; for manual `gcloud builds submit` it is empty (→ invalid image ref).
+  # Pass _TAG=<git-sha-or-label> at submit time; defaults to "manual".
+  _TAG: manual
 
 images:
-  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_TAG}"
 
 steps:
   - id: build
@@ -22,14 +26,14 @@ steps:
       - "-f"
       - deploy/Dockerfile
       - "-t"
-      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_TAG}"
       - "."
 
   - id: push
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_TAG}"
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -38,7 +42,7 @@ steps:
       - run
       - deploy
       - "${_SERVICE}"
-      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${_TAG}"
       - "--region=${_REGION}"
       - "--service-account=${_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
       # Public ingress is REQUIRED: Discord calls /interactions with no GCP
