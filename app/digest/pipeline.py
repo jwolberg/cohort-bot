@@ -58,6 +58,47 @@ def _start_of_day(day: str) -> datetime:
     return midnight - timedelta(days=1) if day == "yesterday" else midnight
 
 
+# Conventional-commit types treated as low-signal for the digest: chores,
+# documentation updates, and bug fixes. Commits carrying one of these types
+# (e.g. "fix: ...", "docs(readme): ...") are excluded so the digest highlights
+# feature/substantive work. Extend this set to tune what counts as noise.
+_LOW_SIGNAL_TYPES = {"chore", "docs", "doc", "fix", "bugfix", "hotfix"}
+
+# Fallback for non-conventional subjects (e.g. "Fix crash", "Update README",
+# "Bump deps"). Matched only at the START of the subject so feature commits that
+# merely mention these words in passing are kept.
+_LOW_SIGNAL_PREFIXES = (
+    "fix ", "fixed ", "fixes ", "bugfix", "hotfix",
+    "docs ", "doc ", "update docs", "update readme", "readme",
+    "chore", "bump ", "typo",
+)
+
+
+def _commit_type(subject: str) -> str | None:
+    """Return the conventional-commit type of a subject line, or None.
+
+    "docs(readme)!: x" → "docs"; "Add feature" (no type prefix) → None.
+    """
+    if ":" not in subject:
+        return None
+    head = subject.split(":", 1)[0].strip().lower()
+    if not head or " " in head:  # not a bare "type:" / "type(scope):" prefix
+        return None
+    head = head.split("(", 1)[0].rstrip("!")  # drop scope + breaking-change "!"
+    return head or None
+
+
+def _is_low_signal(message: str) -> bool:
+    """True if a commit is a chore, docs update, or bug fix (excluded from digest)."""
+    subject = message.splitlines()[0].strip() if message.strip() else ""
+    if not subject:
+        return False
+    ctype = _commit_type(subject)
+    if ctype is not None:
+        return ctype in _LOW_SIGNAL_TYPES
+    return subject.lower().startswith(_LOW_SIGNAL_PREFIXES)
+
+
 class DigestPipeline:
     def __init__(
         self,
@@ -85,6 +126,14 @@ class DigestPipeline:
         self, gh: GitHubClient, username: str, since: datetime | None, *, dedup: bool = True
     ) -> UserSection | None:
         commits = await gh.fetch_user_commits_since(username, since)
+        if not commits:
+            return None
+
+        # Advance the cursor past EVERYTHING fetched (including filtered commits)
+        # so low-signal commits aren't re-scanned on the next run, then keep only
+        # signal commits (drop chores, docs updates, and bug fixes) for reporting.
+        new_cursor = max(c.timestamp for c in commits)
+        commits = [c for c in commits if not _is_low_signal(c.message)]
         if not commits:
             return None
 
@@ -130,7 +179,6 @@ class DigestPipeline:
 
         if not repo_sections:
             return None
-        new_cursor = max(c.timestamp for c in commits)
         return UserSection(
             username=username, total=total, repos=repo_sections,
             new_shas=new_shas, new_cursor=new_cursor,

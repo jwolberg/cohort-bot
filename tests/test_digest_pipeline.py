@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.digest.formatter import format_digest
-from app.digest.pipeline import DigestPipeline, RepoSection, UserSection
+from app.digest.pipeline import DigestPipeline, RepoSection, UserSection, _is_low_signal
 from app.discord import interactions as interactions_module
 from app.github.client import GitHubClient
 from app.main import create_app
@@ -46,11 +46,28 @@ class FakeRest:
 
 
 def _push_event(repo, commits, created_at="2026-07-02T10:00:00Z"):
+    # PushEvent payloads no longer inline commits; the client hydrates the
+    # before...head range via the compare API. Mirror that: emit before/head and
+    # register the matching compare mock returning the commits.
+    shas = [s for s, _ in commits]
+    before = "before_" + "_".join(shas)
+    head = "head_" + "_".join(shas)
+    respx.get(f"{BASE}/repos/{repo}/compare/{before}...{head}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "commits": [
+                    {"sha": s, "commit": {"message": m, "author": {"name": "Jay"}}}
+                    for s, m in commits
+                ]
+            },
+        )
+    )
     return {
         "type": "PushEvent",
         "created_at": created_at,
         "repo": {"name": repo},
-        "payload": {"commits": [{"sha": s, "message": m, "author": {"name": "Jay"}} for s, m in commits]},
+        "payload": {"before": before, "head": head},
     }
 
 
@@ -73,6 +90,42 @@ def _pipeline(repos, rest, enqueuer=None):
     return DigestPipeline(
         repos, enqueuer or FakeEnqueuer(), get_settings(), rest, FakeSummarizer()
     )
+
+
+# --- Low-signal commit classifier ---
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "chore: bump deps",
+        "docs: rewrite guide",
+        "docs(readme): tweak",
+        "fix: null deref",
+        "fix!: breaking fix",
+        "Fix crash on startup",
+        "Update README",
+        "Bump version to 2.0",
+        "typo",
+    ],
+)
+def test_is_low_signal_true(message) -> None:
+    assert _is_low_signal(message) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "feat: add dashboard",
+        "Add export endpoint",
+        "refactor: extract service",
+        "perf: cache lookups",
+        "fixture: seed test data",  # "fix" prefix must not match
+        "Improve docs discoverability",  # "docs" mid-sentence must not match
+    ],
+)
+def test_is_low_signal_false(message) -> None:
+    assert _is_low_signal(message) is False
 
 
 # --- Idempotency / cursor (execution note: write first) ---
@@ -123,6 +176,57 @@ async def test_per_user_filters_already_processed_shas(firestore_client) -> None
     assert section is not None
     assert section.total == 1
     assert section.new_shas["o/r"] == ["s2"]  # s1 filtered out
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_low_signal_commits_are_filtered_but_cursor_advances(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_users.add("jay", added_by="a")
+    _mock_user(
+        "jay",
+        [
+            _push_event(
+                "o/r",
+                [
+                    ("s1", "feat: add dashboard"),
+                    ("s2", "chore: bump deps"),
+                    ("s3", "docs(readme): update setup"),
+                    ("s4", "fix: correct off-by-one"),
+                    ("s5", "Add export endpoint"),
+                ],
+            )
+        ],
+    )
+    _mock_repo("o/r")
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest)
+
+    posted = await pipeline.process_user("jay")
+    assert posted is True
+    # Only the two signal commits are reported/recorded; chore/docs/fix dropped.
+    assert await repos.processed_commits.has_sha("o/r", "s1") is True
+    assert await repos.processed_commits.has_sha("o/r", "s5") is True
+    for dropped in ("s2", "s3", "s4"):
+        assert await repos.processed_commits.has_sha("o/r", dropped) is False
+    # Cursor still advances past the whole batch so noise isn't re-scanned.
+    assert await repos.tracked_users.get_cursor("jay") is not None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_all_low_signal_commits_yields_no_section(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    _mock_user(
+        "jay",
+        [_push_event("o/r", [("s1", "chore: tidy"), ("s2", "fix typo in log")])],
+    )
+    _mock_repo("o/r")
+    pipeline = _pipeline(repos, FakeRest())
+    async with GitHubClient(get_settings().github_token, repos.repo_cache) as gh:
+        section = await pipeline.compute_section(gh, "jay", None)
+    assert section is None
 
 
 @respx.mock
