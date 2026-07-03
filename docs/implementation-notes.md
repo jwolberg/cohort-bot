@@ -4,6 +4,45 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-07-03 — Substack publication tracking (S1–S7)
+
+Implemented the second content source (Substack) per `docs/spec.md` +
+`docs/BUILD_PLAN.md`. Tickets S1–S6 complete; S7 = TTL wired, PRD/ARCHITECTURE
+doc updates still pending.
+
+- **S1 store:** `TrackedPublicationsRepo` + `ProcessedPostsRepo` mirror the
+  GitHub repos. Decision (A5): a publication's `last_cursor` is set to the add
+  time via `SERVER_TIMESTAMP` on `add()`, so the scheduled digest never dumps a
+  back catalog. `processed_posts` doc id = `slug@post_id`; the post_id (a feed
+  guid/link, often a URL) is `_encode()`d, same as `owner/repo`.
+- **S2 client:** `app/substack/client.py` mirrors `GitHubClient`. `defusedxml`
+  is the one net-new runtime dependency (A1) — added to `pyproject.toml`. Dedup
+  key = `guid`, fallback `link`; entries missing a parseable `pubDate` OR both
+  keys are skipped. Excerpts are native (no LLM). Best-effort: 404 →
+  `NotFoundError`, any other transport/parse failure → `SubstackError`; callers
+  skip one bad feed rather than failing the run/command.
+- **S3 pipeline:** `compute_publication_section` mirrors `compute_section`
+  (dedup on scheduled path, none on-demand; cursor advances past everything
+  fetched). `process_publication` is post-first-then-record-then-cursor
+  (retry-safe). `run_fanout()` now also enqueues one task per enabled
+  publication; the SLO heartbeat log gains `publications`/`pubs_enqueued`
+  fields but its emit condition is unchanged (still keyed off the GitHub header
+  — GitHub remains the primary source). `substack_factory` mirrors `gh_factory`.
+- **S4 worker:** `/tasks/substack/publication` (OIDC-gated) reuses the
+  `digest-fanout` queue — no new queue/scheduler (AC#10).
+- **S5 `/substack`:** optional `window` option (`1d`|`7d`|`30d`, default `1d`
+  per A2) via the existing slow-command defer → follow-up → PATCH path.
+- **S6 admin:** `/admin/api/publications` CRUD + a Publications panel section.
+  Decision: the admin POST normalizes any pasted host/publication/feed URL to
+  `https://<host>/feed` (Substack-style feeds live at `/feed`); a custom domain
+  whose feed sits at a different path is out of scope (spec: Substack-style
+  only). `title` is optional on add and falls back to the slug in rendering — a
+  best-effort channel-title fetch was deliberately skipped to avoid an extra
+  add-time network dependency and keep the client surface small.
+- **S7 deploy/docs:** `deploy/setup.sh` now enables the `processed_posts`
+  `expire_at` TTL (AC#9). **Follow-up:** `docs/PRD.md` + `docs/ARCHITECTURE.md`
+  (§5 commands, §7 collections) still need the Substack source documented.
+
 ## 2026-07-03 — Digest signal filtering (chores/docs/fixes excluded)
 
 - **Change:** the daily digest was too long, so `compute_section`

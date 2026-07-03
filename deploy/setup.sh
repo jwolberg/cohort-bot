@@ -90,6 +90,11 @@ gcloud firestore fields ttls update expire_at \
   --collection-group=processed_commits --enable-ttl >/dev/null 2>&1 || \
   echo "    TTL update skipped (may already be enabled)"
 
+echo "==> Firestore TTL policy on processed_posts.expire_at"
+gcloud firestore fields ttls update expire_at \
+  --collection-group=processed_posts --enable-ttl >/dev/null 2>&1 || \
+  echo "    TTL update skipped (may already be enabled)"
+
 echo "==> Cloud Tasks queues"
 for q in "${FANOUT_QUEUE}" "${FOLLOWUPS_QUEUE}"; do
   if ! gcloud tasks queues describe "${q}" --location="${REGION}" >/dev/null 2>&1; then

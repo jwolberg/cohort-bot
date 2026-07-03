@@ -58,10 +58,12 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   management command; no historical backfill; no generic (non-Substack) RSS.
 
 ## Current Status
-- **Overall status:** Not Started
-- **Current phase:** Phase 1 — Data Layer
-- **Current ticket:** P1-T1
-- **Blockers:** None (A1 resolved: stdlib + `defusedxml`)
+- **Overall status:** Implemented (feature complete; docs follow-up pending)
+- **Current phase:** Phase 5 — Deploy & Docs
+- **Current ticket:** P5-T1 (In Progress — TTL done, PRD/ARCHITECTURE pending)
+- **Blockers:** None
+- **Validation:** full suite green (139 passed); app boots with the new
+  `/tasks/substack/publication` route, `/substack` command, and providers wired.
 
 ---
 
@@ -92,7 +94,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
     TTL). Doc shape: `{slug, feed_url, title, enabled, added_by, created_at,
     last_cursor}`.
   - Commit: one commit — "feat(store): tracked_publications + processed_posts repos (S1)".
-  - Status: Todo
+  - Status: Complete
 
 ### Phase 2 — Substack Source Client
 **Goal**
@@ -121,7 +123,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   - Acceptance criteria: spec AC#4, AC#8; mirrors `GitHubClient` shape (ARCH §8):
     async CM, injectable client, typed errors, best-effort per-feed skip.
   - Commit: "feat(substack): async RSS/Atom client + PostRef parser (S2)".
-  - Status: Todo
+  - Status: Complete
 
 ### Phase 3 — Digest Integration
 **Goal**
@@ -149,7 +151,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
     dedup); ARCH §6c section-compute pattern; rendering = native excerpt (spec
     Decision 2).
   - Commit: "feat(digest): per-publication section compute + formatter (S3a)".
-  - Status: Todo
+  - Status: Complete
 - **P3-T2 — Per-publication scheduled worker + enqueue + wiring**
   - Objective: Add `SUBSTACK_PUBLICATION_PATH = "/tasks/substack/publication"` and
     `enqueue_substack_publication()` to `app/tasks/queue.py` (reuse the `digest-fanout`
@@ -165,7 +167,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
     (idempotent no-op on no new posts), AC#10 (no new queue/scheduler); ARCH §6c
     (fan-out idempotency), §10 (`require_oidc`).
   - Commit: "feat(digest): substack check worker + enqueue (S3b/S4)".
-  - Status: Todo
+  - Status: Complete
 
 ### Phase 4 — User & Admin Surfaces
 **Goal**
@@ -189,7 +191,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   - Acceptance criteria: spec AC#7; ARCH §5 (command schema), §6b (slow-path defer
     → follow-up → PATCH original response).
   - Commit: "feat(discord): /substack on-demand command (S5)".
-  - Status: Todo
+  - Status: Complete
 - **P4-T2 — Admin publications CRUD + panel**
   - Objective: Add `/admin/api/publications` GET/POST/DELETE to `app/admin/api.py`
     (`Depends(require_admin)`, `Depends(get_repos)`); POST `{feed_url}` normalizes +
@@ -200,7 +202,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   - Acceptance criteria: spec AC#1, AC#2, AC#3; ARCH §9 (admin CRUD parity), §10
     (unsigned IAP email header rejected — regression parity with users).
   - Commit: "feat(admin): publications CRUD + panel section (S6)".
-  - Status: Todo
+  - Status: Complete
 
 ### Phase 5 — Deploy & Docs
 **Goal**
@@ -222,7 +224,7 @@ Carried from `spec.md` "Open Questions" — minimal, flagged, revisit at P1/P2:
   - Depends on: P1-T1 (collection name), and ideally P3/P4 landed (accurate docs).
   - Acceptance criteria: spec AC#9, AC#10; ARCH §7 TTL convention.
   - Commit: "chore(deploy): processed_posts TTL + docs (S7)".
-  - Status: Todo
+  - Status: In Progress (TTL done; PRD/ARCHITECTURE updates pending)
 
 ---
 
