@@ -35,11 +35,13 @@ CommandDispatcher = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 FollowupHandler = Callable[[dict[str, Any]], Awaitable[None]]
 DigestRunner = Callable[[], Awaitable[None]]
 DigestUserWorker = Callable[[str], Awaitable[None]]
+PublicationWorker = Callable[[str], Awaitable[None]]
 
 _dispatcher: CommandDispatcher | None = None
 _followup_handler: FollowupHandler | None = None
 _digest_runner: DigestRunner | None = None
 _digest_user_worker: DigestUserWorker | None = None
+_publication_worker: PublicationWorker | None = None
 
 
 def set_command_dispatcher(dispatcher: CommandDispatcher) -> None:
@@ -59,6 +61,12 @@ def set_digest_handlers(runner: DigestRunner, user_worker: DigestUserWorker) -> 
     global _digest_runner, _digest_user_worker
     _digest_runner = runner
     _digest_user_worker = user_worker
+
+
+def set_publication_worker(worker: PublicationWorker) -> None:
+    """Register the per-publication Substack worker (S4)."""
+    global _publication_worker
+    _publication_worker = worker
 
 
 def get_public_key() -> str:
@@ -131,4 +139,17 @@ async def tasks_digest_user(request: Request) -> JSONResponse:
     if not username:
         raise HTTPException(status_code=400, detail="username required")
     await _digest_user_worker(username)
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/tasks/substack/publication", dependencies=[Depends(require_oidc)])
+async def tasks_substack_publication(request: Request) -> JSONResponse:
+    """Per-publication Substack worker enqueued by the fan-out (OIDC-gated)."""
+    if _publication_worker is None:
+        raise HTTPException(status_code=503, detail="publication worker not ready")
+    payload = await request.json()
+    slug = payload.get("slug")
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug required")
+    await _publication_worker(slug)
     return JSONResponse({"status": "ok"})

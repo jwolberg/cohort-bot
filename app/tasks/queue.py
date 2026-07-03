@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 FOLLOWUP_PATH = "/tasks/followup"
 DIGEST_USER_PATH = "/tasks/digest/user"
 DIGEST_RUN_PATH = "/tasks/digest/run"
+SUBSTACK_PUBLICATION_PATH = "/tasks/substack/publication"
 
 
 class EnqueueError(Exception):
@@ -85,4 +86,10 @@ class TaskEnqueuer:
         """Trigger a full digest run (used by the admin 'test digest' button)."""
         return await self.enqueue(
             self._settings.digest_fanout_queue, DIGEST_RUN_PATH, payload or {}
+        )
+
+    async def enqueue_substack_publication(self, payload: dict[str, Any]) -> str:
+        """Enqueue one publication's Substack check (reuses the digest-fanout queue)."""
+        return await self.enqueue(
+            self._settings.digest_fanout_queue, SUBSTACK_PUBLICATION_PATH, payload
         )

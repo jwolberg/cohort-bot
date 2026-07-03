@@ -36,10 +36,15 @@ class FakeSummarizer:
 class FakeEnqueuer:
     def __init__(self):
         self.digest_users: list[dict] = []
+        self.substack_pubs: list[dict] = []
 
     async def enqueue_digest_user(self, payload):
         self.digest_users.append(payload)
         return "task/1"
+
+    async def enqueue_substack_publication(self, payload):
+        self.substack_pubs.append(payload)
+        return "task/2"
 
 
 class FakeRest:
@@ -361,6 +366,82 @@ def test_format_substack_empty_reports_no_posts() -> None:
     assert "No recent posts" in embeds[0]["description"]
 
 
+# --- Substack scheduled worker (S3b/S4) ---
+
+
+def _substack_pipeline(repos, rest, posts=None, error=None, enqueuer=None):
+    return DigestPipeline(
+        repos, enqueuer or FakeEnqueuer(), get_settings(), rest, FakeSummarizer(),
+        substack_factory=lambda: FakeSubstackClient(posts=posts, error=error),
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_publication_posts_and_advances_cursor(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_publications.add(
+        "ex.substack.com", "https://ex.substack.com/feed", title="Ex", added_by="a"
+    )
+    # Pin the cursor before the sample posts so they count as new.
+    await repos.tracked_publications.set_cursor(
+        "ex.substack.com", datetime(2026, 7, 1, tzinfo=timezone.utc)
+    )
+    rest = FakeRest()
+    pipeline = _substack_pipeline(repos, rest, posts=[_post("p1", 2), _post("p2", 3)])
+
+    posted = await pipeline.process_publication("ex.substack.com")
+    assert posted is True
+    assert len(rest.posts) == 1
+    assert await repos.processed_posts.has_post("ex.substack.com", "p1") is True
+    assert await repos.processed_posts.has_post("ex.substack.com", "p2") is True
+    assert await repos.tracked_publications.get_cursor("ex.substack.com") == datetime(
+        2026, 7, 3, 10, 0, tzinfo=timezone.utc
+    )
+
+    # Re-run posts nothing new (idempotent per publication).
+    assert await pipeline.process_publication("ex.substack.com") is False
+    assert len(rest.posts) == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_publication_post_failure_leaves_state(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_publications.add(
+        "ex.substack.com", "https://ex.substack.com/feed", added_by="a"
+    )
+    await repos.tracked_publications.set_cursor(
+        "ex.substack.com", datetime(2026, 7, 1, tzinfo=timezone.utc)
+    )
+    pipeline = _substack_pipeline(repos, FakeRest(fail=True), posts=[_post("p1", 2)])
+
+    with pytest.raises(RuntimeError):
+        await pipeline.process_publication("ex.substack.com")
+    # Post failed → dedup key not recorded, cursor unchanged (retry-safe).
+    assert await repos.processed_posts.has_post("ex.substack.com", "p1") is False
+    assert await repos.tracked_publications.get_cursor("ex.substack.com") == datetime(
+        2026, 7, 1, tzinfo=timezone.utc
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_enqueues_one_task_per_publication(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_users.add("jay", added_by="a")
+    await repos.tracked_publications.add("a.substack.com", "https://a.substack.com/feed", added_by="a")
+    await repos.tracked_publications.add("b.substack.com", "https://b.substack.com/feed", added_by="a")
+    enqueuer = FakeEnqueuer()
+    pipeline = _pipeline(repos, FakeRest(), enqueuer)
+
+    await pipeline.run_fanout()
+    assert {p["slug"] for p in enqueuer.substack_pubs} == {"a.substack.com", "b.substack.com"}
+
+
 # --- Fan-out ---
 
 
@@ -491,3 +572,26 @@ def test_digest_run_valid_dispatches_to_runner(client: TestClient, monkeypatch) 
     resp = client.post("/tasks/digest/run", headers={"Authorization": "Bearer x"})
     assert resp.status_code == 200
     assert called.get("ran") is True
+
+
+def test_substack_publication_requires_oidc(client: TestClient) -> None:
+    assert client.post("/tasks/substack/publication").status_code == 401
+
+
+def test_substack_publication_missing_slug_400(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
+    resp = client.post("/tasks/substack/publication", json={}, headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 400
+
+
+def test_substack_publication_dispatches_to_worker(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
+    called = {}
+
+    async def worker(slug):
+        called["slug"] = slug
+
+    interactions_module.set_publication_worker(worker)
+    resp = client.post("/tasks/substack/publication", json={"slug": "ex.substack.com"}, headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 200
+    assert called.get("slug") == "ex.substack.com"

@@ -261,6 +261,7 @@ class DigestPipeline:
         config = await self._repos.config.get()
         channel = config.get("digest_channel_id", "")
         users = await self._repos.tracked_users.list_enabled()
+        publications = await self._repos.tracked_publications.list_enabled()
 
         posted = False
         if channel and users:
@@ -281,11 +282,23 @@ class DigestPipeline:
             except EnqueueError:
                 logger.warning("digest_user_enqueue_failed", extra={"username": user["username"]})
 
+        # Fan out one Substack task per enabled publication (same best-effort
+        # rule; a publication with no new posts simply posts nothing — A3).
+        pubs_enqueued = 0
+        for pub in publications:
+            try:
+                await self._enqueuer.enqueue_substack_publication({"slug": pub["slug"]})
+                pubs_enqueued += 1
+            except EnqueueError:
+                logger.warning("substack_pub_enqueue_failed", extra={"slug": pub["slug"]})
+
         duration_ms = round((time.monotonic() - started) * 1000)
         if posted:
             log_event(
                 logger, HEARTBEAT_EVENT,
-                users=len(users), enqueued=enqueued, channel=channel, duration_ms=duration_ms,
+                users=len(users), enqueued=enqueued,
+                publications=len(publications), pubs_enqueued=pubs_enqueued,
+                channel=channel, duration_ms=duration_ms,
             )
         else:
             logger.warning(
@@ -319,6 +332,36 @@ class DigestPipeline:
         if section.new_cursor is not None:
             await self._repos.tracked_users.set_cursor(username, section.new_cursor)
         log_event(logger, "digest_user_posted", username=username, commits=section.total)
+        return True
+
+    async def process_publication(self, slug: str) -> bool:
+        """Compute and post one publication's new posts; advance cursor on success.
+
+        Mirrors :meth:`process_user`: post FIRST, then record dedup keys and
+        advance the cursor — a Cloud Tasks retry after a failed post recomputes
+        and reposts (spec AC#5/#6). Returns False (no post, no cursor change)
+        when the publication is gone/disabled or has no new posts.
+        """
+        config = await self._repos.config.get()
+        channel = config.get("digest_channel_id", "")
+        publication = await self._repos.tracked_publications.get(slug)
+        if publication is None or not publication.get("enabled", False):
+            return False
+        since = publication.get("last_cursor")
+
+        async with self._substack_factory() as client:
+            section = await self.compute_publication_section(client, publication, since)
+        if section is None:
+            return False
+
+        embed = formatter.format_publication_section(section)
+        # Post FIRST — cursor/dedup are only advanced after a successful post.
+        await self._rest.post_channel_message(channel, embeds=[embed])
+
+        await self._repos.processed_posts.record_posts(slug, section.new_post_ids)
+        if section.new_cursor is not None:
+            await self._repos.tracked_publications.set_cursor(slug, section.new_cursor)
+        log_event(logger, "substack_publication_posted", slug=slug, posts=len(section.posts))
         return True
 
     # --- on-demand /digest command ---
@@ -361,8 +404,12 @@ def install_digest() -> None:
     async def _user(username: str) -> None:
         await _pipeline().process_user(username)
 
+    async def _publication(slug: str) -> None:
+        await _pipeline().process_publication(slug)
+
     async def _on_demand(day: str) -> list[dict[str, Any]]:
         return await _pipeline().on_demand(day or "today")
 
     interactions_module.set_digest_handlers(_run, _user)
+    interactions_module.set_publication_worker(_publication)
     handlers_module.set_digest_provider(_on_demand)
