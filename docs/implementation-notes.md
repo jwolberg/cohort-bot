@@ -84,9 +84,9 @@ doc updates still pending.
 
 ### Deploy: infra provisioning against `cohort-bot-1`
 - **Target project:** created a **new dedicated project `cohort-bot-1`** (user's
-  choice) rather than reusing the shell's then-current `global-pulse-8`, which
-  already hosts another app + a live Firestore Native DB. Billing linked to the
-  existing account `0142FA-BE81E1-A43239`.
+  choice) rather than reusing the shell's then-current project (an existing
+  personal project), which already hosts another app + a live Firestore Native
+  DB. Billing linked to an existing account (`<redacted>`).
 - **Scope:** ran `deploy/setup.sh` **pass 1 only** (no `SERVICE_URL`) — infra
   now exists (APIs, `digest-bot-sa` + least-priv IAM, Artifact Registry
   `digest-bot`, Firestore Native @ us-central1, TTL policy, Cloud Tasks queues
@@ -95,7 +95,7 @@ doc updates still pending.
 - **Admin auth decision:** will use the `ADMIN_TOKEN` bearer fallback (no IAP/LB)
   for this MVP — leave `IAP_AUDIENCE` unset.
 - **Deviation — `setup.sh` hardening:** the first run silently redirected the
-  Cloud Tasks step to a **different project (`airbnb-1001`)** — a concurrent
+  Cloud Tasks step to a **different (personal) project** — a concurrent
   gcloud process flipped the shared `gcloud config set project` value mid-run.
   Changed `setup.sh` to pin the project **per-process** via
   `export CLOUDSDK_CORE_PROJECT` (env var, takes precedence over and is immune to
@@ -133,19 +133,19 @@ doc updates still pending.
     deploy debugging. **Follow-up: rename the health route to `/health`.**
   - **Step 4/5 done:** `SERVICE_URL`+`TASK_INVOKER_SA_EMAIL` set; Scheduler
     `daily-digest` + `digest_heartbeat` metric created.
-  - **Discord wired:** `TV1-dev` already in guild `1238157008428077177`; 6
+  - **Discord wired:** `TV1-dev` already in guild `<redacted>`; 6
     commands registered to it; Interactions Endpoint URL set via API → PING→PONG
     HTTP 200 (Ed25519 verified end to end).
   - **Still needed for full function:** real `GITHUB_TOKEN` (placeholder now),
     fix suspect `ANTHROPIC_API_KEY`, set `ADMIN_TOKEN` + bootstrap
     `config.digest_channel_id` (Step 9), monitoring alert policy (Step 10).
 - **Post-deploy runtime fixes (during testing):**
-  - All 5 real secrets loaded & validated (Discord ✓, `GITHUB_TOKEN` v2 auth as
-    `jwolberg`/5000, `ANTHROPIC_API_KEY` v2 valid, `ADMIN_TOKEN` set). Secrets
-    pinned to explicit versions to force revision remounts.
-  - 5 GitHub users tracked via admin API; `the-real-adammork` corrected from a
-    404 typo.
-  - `config.digest_channel_id` = `1238157008872542208` (automated digest target).
+  - All 5 real secrets loaded & validated (Discord ✓, `GITHUB_TOKEN` v2 auth,
+    5000/hr rate limit confirmed, `ANTHROPIC_API_KEY` v2 valid, `ADMIN_TOKEN`
+    set). Secrets pinned to explicit versions to force revision remounts.
+  - 5 GitHub users tracked via admin API; one username corrected from a 404
+    typo.
+  - `config.digest_channel_id` = `<redacted>` (automated digest target).
     On-demand `/digest`/`/repo`/`/user` reply in the invoking channel via
     `edit_original_response` — no channel config needed.
   - **Deviation — `setup.sh` missing `actAs`:** slow commands enqueue a Cloud

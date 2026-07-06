@@ -2,7 +2,9 @@
 
 Non-secret identifiers for the first production deploy + test setup. **No secret
 values live here** — tokens/keys are in Secret Manager (project `cohort-bot-1`)
-and the macOS keychain. Safe to commit (all IDs below are public identifiers).
+and the macOS keychain. Billing account, service account, and Discord
+guild/channel IDs are redacted below since this repo is public — see your local
+untracked notes or Secret Manager/GCP console for the real values.
 
 _Last updated: 2026-07-02._
 
@@ -17,14 +19,14 @@ _Last updated: 2026-07-02._
 | Service account | `digest-bot-sa@cohort-bot-1.iam.gserviceaccount.com` |
 | Artifact Registry repo | `digest-bot` (us-central1) |
 | Firestore | `(default)`, Native mode, us-central1 |
-| Billing account | `0142FA-BE81E1-A43239` |
+| Billing account | `<redacted>` |
 
 ## Deploy status (2026-07-02 — LIVE)
 
 - **Service URL:** `https://digest-bot-xrowcvf5wq-uc.a.run.app` (revision `digest-bot-00002-bex`, 100% traffic).
 - **Public ingress:** `allUsers` → `roles/run.invoker` (added manually — org policy blocked the deploy-time `--allow-unauthenticated`). Security enforced in-app.
 - **Interactions Endpoint URL:** set on `TV1-dev` → `…/interactions`. Discord PING→PONG **validated** (HTTP 200), so Ed25519 verification works end to end.
-- **Slash commands:** 6 registered to guild `1238157008428077177` (instant).
+- **Slash commands:** 6 registered to guild `<redacted>` (instant).
 - **Scheduler:** `daily-digest` → `/tasks/digest/run` (OIDC), 13:00 UTC. `digest_heartbeat` log metric created.
 - **`/healthz` caveat:** Google's frontend shadows the literal `/healthz` path on `*.run.app` (returns Google's 404 before reaching the app). Cosmetic — the route is registered (`app/main.py:21`) and all real endpoints work. **Follow-up:** rename health route to `/health` so the DEPLOY.md health check works.
 
@@ -54,8 +56,8 @@ From the provided `discord.com/channels/<GUILD>/<CHANNEL>` URLs:
 
 | Role | Guild (server) ID | Channel ID |
 |---|---|---|
-| Primary (invite target / default digest) | `1238157008428077177` | `1238157008872542208` |
-| Secondary | `1516303266323890237` | `1516303267330785312` |
+| Primary (invite target / default digest) | `<redacted>` | `<redacted>` |
+| Secondary | `<redacted>` | `<redacted>` |
 
 - **Guild ID** → slash-command registration: `register_commands --guild <GUILD_ID>` (instant).
 - **Channel ID** → Firestore `config.digest_channel_id` (where the daily digest posts; DEPLOY.md Step 9).
@@ -73,7 +75,7 @@ From the provided `discord.com/channels/<GUILD>/<CHANNEL>` URLs:
 | `DISCORD_PUBLIC_KEY` | ✅ real |
 | `DISCORD_TOKEN` | ✅ real (`TV1-dev`, from keychain) |
 | `ANTHROPIC_API_KEY` | ✅ real (v2, from keychain `cohortbot-ANTHROPIC_API`, validated 200 against `/v1/models`). Earlier v1 was a bad 218-char value. |
-| `GITHUB_TOKEN` | ✅ real (v2, from keychain `cohortbot-GITHUB_API`, authenticates as `jwolberg`, 5000/hr). v1 was a placeholder; a `cohortbot-GITHUB` attempt was 401/invalid. |
+| `GITHUB_TOKEN` | ✅ real (v2, from keychain `cohortbot-GITHUB_API`, 5000/hr). v1 was a placeholder; a `cohortbot-GITHUB` attempt was 401/invalid. |
 | `ADMIN_TOKEN` | ✅ real (keychain `cohortbot-ADMIN_TOKEN`), mapped; admin API validated (401 without / 200 with). |
 
 To replace a placeholder later (no code change; needs a new revision to pick up):
