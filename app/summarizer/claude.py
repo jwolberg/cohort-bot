@@ -25,7 +25,12 @@ MAX_MESSAGE_CHARS = 300
 SYSTEM_PROMPT = (
     "You summarize a developer's recent commits in one repository into a single "
     "concise paragraph (1-3 sentences) describing the engineering work performed. "
-    "Be specific and factual; do not use bullet points or a preamble."
+    "Be specific and factual; do not use bullet points or a preamble. "
+    "Write it resume-style: jump straight into the substance (e.g. 'Added X', "
+    "'Refactored Y to Z', 'Fixed a race condition in W'). Do not open with "
+    "boilerplate like 'The developer completed/implemented/expanded/increased' "
+    "or any other stock subject-plus-verb preamble — vary sentence structure "
+    "instead of repeating the same opener across summaries."
 )
 
 
