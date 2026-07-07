@@ -15,17 +15,24 @@ import re
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.digest.formatter import MAX_FIELDS_PER_EMBED, _post_field
 from app.discord import interactions as interactions_module
 from app.discord import responses
 from app.discord.rest import DiscordREST
 from app.github.client import GitHubClient, NotFoundError
 from app.logging import get_logger
 from app.store.repositories import Repositories, get_repositories
+from app.substack.client import (
+    NotFoundError as SubstackNotFound,
+    SubstackClient,
+    SubstackError,
+    normalize_feed_url,
+)
 from app.tasks.queue import TaskEnqueuer
 
 logger = get_logger(__name__)
 
-SLOW_COMMANDS = {"repo", "branches", "user", "digest", "substack"}
+SLOW_COMMANDS = {"repo", "branches", "user", "digest", "substack", "publication"}
 
 # The /digest and /substack on-demand providers are registered by the digest
 # pipeline (U9 / S5).
@@ -58,6 +65,7 @@ HELP_TEXT = (
     "`/user <user>` — recent activity for a user\n"
     "`/digest today|yesterday` — post the digest\n"
     "`/substack [1d|7d|30d]` — recent posts from tracked publications\n"
+    "`/publication <url>` — inspect a Substack publication\n"
 )
 
 
@@ -85,15 +93,20 @@ class CommandHandler:
         rest: DiscordREST,
         *,
         gh_factory=None,
+        substack_factory=None,
     ) -> None:
         self._repos = repos
         self._enqueuer = enqueuer
         self._settings = settings
         self._rest = rest
         self._gh_factory = gh_factory or self._default_gh
+        self._substack_factory = substack_factory or self._default_substack
 
     def _default_gh(self) -> GitHubClient:
         return GitHubClient(self._settings.github_token, self._repos.repo_cache)
+
+    def _default_substack(self) -> SubstackClient:
+        return SubstackClient()
 
     # --- dispatch (fast path + defer) ---
 
@@ -116,6 +129,19 @@ class CommandHandler:
                         embeds=[responses.embed("Invalid repository", description="Use `owner/repo`.")],
                         ephemeral=True,
                     )
+            if name == "publication":
+                # Normalize the pasted URL/host to its /feed URL up front; a
+                # hostless input never reaches the worker (mirrors the repo guard).
+                feed_url = normalize_feed_url(opts.get("publication", "") or "")
+                if not feed_url:
+                    return responses.message(
+                        embeds=[responses.embed(
+                            "Invalid publication",
+                            description="Provide a Substack URL or host, e.g. `pragmaticengineer.substack.com`.",
+                        )],
+                        ephemeral=True,
+                    )
+                opts["publication"] = feed_url
             await self._enqueuer.enqueue_followup(
                 {
                     "application_id": interaction.get("application_id", self._settings.discord_app_id),
@@ -200,6 +226,14 @@ class CommandHandler:
             await self._rest.edit_original_response(application_id, token, embeds=embeds)
             return
 
+        # /publication inspects one Substack feed live (parity with /repo), so it
+        # opens a SubstackClient rather than the GitHub client below.
+        if command == "publication":
+            async with self._substack_factory() as sc:
+                embed = await self._publication_embed(sc, opts["publication"])
+            await self._rest.edit_original_response(application_id, token, embeds=[embed])
+            return
+
         async with self._gh_factory() as gh:
             if command == "repo":
                 embed = await self._repo_embed(gh, opts["repo"])
@@ -233,6 +267,27 @@ class CommandHandler:
             repo,
             description=info.description or None,
             url=f"https://github.com/{repo}",
+            fields=fields,
+        )
+
+    async def _publication_embed(self, sc: SubstackClient, feed_url: str) -> dict[str, Any]:
+        try:
+            view = await sc.fetch_publication(feed_url, limit=5)
+        except SubstackNotFound:
+            return responses.embed("Not found", description=f"No Substack feed at `{feed_url}`.")
+        except SubstackError:
+            return responses.embed("Unreachable", description=f"Could not read the feed at `{feed_url}`.")
+        if not view.posts:
+            return responses.embed(
+                f"📰 {view.title}",
+                description="No recent posts.",
+                url=view.link or None,
+            )
+        fields = [_post_field(p) for p in view.posts[:MAX_FIELDS_PER_EMBED]]
+        return responses.embed(
+            f"📰 {view.title}",
+            description=view.description or None,
+            url=view.link or None,
             fields=fields,
         )
 

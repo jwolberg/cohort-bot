@@ -62,6 +62,17 @@ class PostRef:
     excerpt: str
 
 
+@dataclass
+class PublicationView:
+    """Channel metadata + recent posts for ad-hoc inspection (/publication)."""
+
+    slug: str
+    title: str
+    description: str
+    link: str
+    posts: list[PostRef]
+
+
 class _TextExtractor(HTMLParser):
     """Collect text nodes, dropping tags (entities already decoded by the parser)."""
 
@@ -102,6 +113,24 @@ def slug_for(feed_url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host or feed_url.strip().lower()
+
+
+def normalize_feed_url(raw: str) -> str:
+    """Normalize a pasted Substack feed *or* publication URL to its RSS feed URL.
+
+    Accepts ``pragmaticengineer.substack.com``, ``https://…substack.com`` or the
+    ``/feed`` URL; returns ``https://<host>/feed``. Empty/hostless input → "".
+    Shared by the admin panel (add-publication) and the ``/publication`` command.
+    """
+    url = raw.strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "https://" + url
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/feed"
 
 
 def _parse_pubdate(value: str | None) -> datetime | None:
@@ -166,8 +195,37 @@ class SubstackClient:
         other transport/parse failure, so the caller can skip one bad feed
         without failing the whole run (spec AC#8).
         """
-        assert self._client is not None, "use SubstackClient as an async context manager"
+        channel = await self._fetch_channel(feed_url)
+        posts = self._parse_items(slug_for(feed_url), channel, since)
+        return posts[:limit]
+
+    async def fetch_publication(self, feed_url: str, *, limit: int = 5) -> PublicationView:
+        """Fetch a publication's channel metadata + recent posts (newest-first).
+
+        For ad-hoc inspection (the ``/publication`` command) — mirrors the shape
+        of :meth:`GitHubClient.fetch_repo`: one call returning title/description
+        plus a bounded list of recent entries. Same error contract as
+        :meth:`fetch_posts_since` (``NotFoundError`` on 404, ``SubstackError``
+        otherwise), so the handler can render a friendly embed instead of raising.
+        """
         slug = slug_for(feed_url)
+        channel = await self._fetch_channel(feed_url)
+        posts = self._parse_items(slug, channel, None)[:limit]
+        return PublicationView(
+            slug=slug,
+            title=_text(channel, "title") or slug,
+            description=clean_excerpt(_text(channel, "description")),
+            link=_text(channel, "link"),
+            posts=posts,
+        )
+
+    async def _fetch_channel(self, feed_url: str) -> Any:
+        """Fetch + parse a feed, returning its ``<channel>`` element.
+
+        Centralizes the transport/size/XML error contract shared by
+        :meth:`fetch_posts_since` and :meth:`fetch_publication`.
+        """
+        assert self._client is not None, "use SubstackClient as an async context manager"
         try:
             async with self._sem:
                 response = await self._client.get(feed_url)
@@ -191,7 +249,12 @@ class SubstackClient:
         channel = root.find("channel")
         if channel is None:
             raise SubstackError(f"no <channel> in feed {feed_url}")
+        return channel
 
+    def _parse_items(
+        self, slug: str, channel: Any, since: datetime | None
+    ) -> list[PostRef]:
+        """Map a channel's ``<item>``s to PostRefs, filtered by ``since``, newest-first."""
         posts: list[PostRef] = []
         for item in channel.findall("item"):
             post = self._parse_item(slug, item)
@@ -200,9 +263,8 @@ class SubstackClient:
             if since is not None and post.published <= since:
                 continue
             posts.append(post)
-
         posts.sort(key=lambda p: p.published, reverse=True)
-        return posts[:limit]
+        return posts
 
     def _parse_item(self, slug: str, item: Any) -> PostRef | None:
         """Map one RSS <item> to a PostRef; return None to skip a bad entry."""

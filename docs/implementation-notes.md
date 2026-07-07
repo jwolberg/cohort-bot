@@ -50,6 +50,36 @@ doc updates still pending.
   live. **Manual step remaining:** register the `/substack` slash command with
   Discord via `scripts/register_commands.py` (needs the live Discord token).
 
+## 2026-07-07 — `/publication` command (Substack analog of `/repo`)
+
+- **Feature:** a new `/publication <url_or_host>` slash command that inspects
+  *any* Substack publication live (tracked or not), mirroring how `/repo`
+  inspects any GitHub repo. Returns a public embed with the publication title,
+  description, and up to 5 recent posts. User-requested parity with `/repo`.
+- **Client:** added `SubstackClient.fetch_publication()` returning a new
+  `PublicationView` (slug/title/description/link/posts). This is the first time
+  we parse the feed's `<channel>` title/description — S6 had deliberately
+  skipped channel-title fetching, but here it's on the live-inspection path
+  (no add-time network cost concern), so we parse it. Refactored the shared
+  transport/size/XML error contract out of `fetch_posts_since` into a private
+  `_fetch_channel()` + `_parse_items()` so both methods share one code path
+  (no behavior change to `fetch_posts_since`; existing tests still pass).
+- **Shared normalizer:** moved `_normalize_feed_url` out of `app/admin/api.py`
+  into `app.substack.client.normalize_feed_url` (public) so the admin panel and
+  the command share one implementation. Same logic; `/publication` validates +
+  normalizes the pasted URL in `dispatch()` before deferring (mirrors the
+  `_REPO_RE` guard for `/repo`). Note: normalization only rejects empty/hostless
+  input — a bad-but-hostful URL still defers and then 404s/errors in the worker,
+  rendered as a friendly "Not found"/"Unreachable" embed (same as `/repo`).
+- **Handler:** `/publication` is a slow command; unlike `/substack` (which
+  delegates to the digest-pipeline provider over the *tracked* set), it follows
+  the `/repo` pattern — opens a `SubstackClient` directly in `run_followup` via
+  a new `substack_factory` (parallel to `gh_factory`) and builds the embed with
+  the reused `formatter._post_field`.
+- **Manual step remaining:** re-run `scripts/register_commands.py` (needs the
+  live Discord token) to register `/publication` with Discord — nothing else
+  auto-registers it.
+
 ## 2026-07-03 — Digest signal filtering (chores/docs/fixes excluded)
 
 - **Change:** the daily digest was too long, so `compute_section`

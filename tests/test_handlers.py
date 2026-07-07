@@ -206,3 +206,68 @@ async def test_substack_followup_calls_provider_and_patches(slow_handler) -> Non
     })
     assert captured["window"] == "7d"
     assert rest.edits[0]["embeds"][0]["title"] == "📰 Substack"
+
+
+# --- /publication slow path (mirrors /repo) ---
+
+_PUB_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>The Pragmatic Engineer</title>
+    <link>https://pragmaticengineer.substack.com</link>
+    <description>A newsletter about engineering.</description>
+    <item>
+      <title>Latest Post</title>
+      <link>https://pragmaticengineer.substack.com/p/latest</link>
+      <pubDate>Wed, 02 Jul 2026 10:00:00 GMT</pubDate>
+      <description>An excerpt.</description>
+    </item>
+  </channel>
+</rss>"""
+
+
+@pytest.mark.asyncio
+async def test_publication_normalizes_and_enqueues(slow_handler) -> None:
+    handler, enqueuer, _ = slow_handler
+    resp = await handler.dispatch(_slash("publication", publication="pragmaticengineer.substack.com"))
+    assert resp["type"] == responses.DEFERRED_CHANNEL_MESSAGE
+    assert enqueuer.followups[0]["command"] == "publication"
+    # The raw host is normalized to its /feed URL before the worker sees it.
+    assert enqueuer.followups[0]["options"]["publication"] == "https://pragmaticengineer.substack.com/feed"
+
+
+@pytest.mark.asyncio
+async def test_publication_rejects_hostless_input(slow_handler) -> None:
+    handler, enqueuer, _ = slow_handler
+    resp = await handler.dispatch(_slash("publication", publication="https://"))
+    assert resp["data"]["flags"] == responses.EPHEMERAL_FLAG
+    assert enqueuer.followups == []  # no task enqueued
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_publication_followup_builds_embed_and_patches(slow_handler) -> None:
+    handler, _, rest = slow_handler
+    feed = "https://pragmaticengineer.substack.com/feed"
+    respx.get(feed).mock(return_value=httpx.Response(200, content=_PUB_RSS.encode()))
+    await handler.run_followup({
+        "application_id": "app", "interaction_token": "tok",
+        "command": "publication", "sub": None, "options": {"publication": feed},
+    })
+    embed = rest.edits[0]["embeds"][0]
+    assert embed["title"] == "📰 The Pragmatic Engineer"
+    assert embed["description"] == "A newsletter about engineering."
+    assert embed["fields"][0]["name"] == '"Latest Post"'
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_publication_followup_not_found_renders_friendly(slow_handler) -> None:
+    handler, _, rest = slow_handler
+    feed = "https://nope.substack.com/feed"
+    respx.get(feed).mock(return_value=httpx.Response(404))
+    await handler.run_followup({
+        "application_id": "app", "interaction_token": "tok",
+        "command": "publication", "sub": None, "options": {"publication": feed},
+    })
+    assert rest.edits[0]["embeds"][0]["title"] == "Not found"
