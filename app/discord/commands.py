@@ -11,6 +11,8 @@ Command surface (PRD "Slash Commands"):
 - /branches <owner/repo>
 - /user <github_user>
 - /digest today|yesterday
+- /substack [1d|7d|30d]
+- /publication <url_or_host>
 - /help
 """
 
@@ -111,6 +113,13 @@ SUBSTACK_COMMAND: dict[str, Any] = {
     ],
 }
 
+PUBLICATION_COMMAND: dict[str, Any] = {
+    "type": CHAT_INPUT,
+    "name": "publication",
+    "description": "Inspect a Substack publication",
+    "options": [_string_option("publication", "Publication URL or host, e.g. pragmaticengineer.substack.com")],
+}
+
 HELP_COMMAND: dict[str, Any] = {
     "type": CHAT_INPUT,
     "name": "help",
@@ -124,5 +133,6 @@ COMMANDS: list[dict[str, Any]] = [
     USER_COMMAND,
     DIGEST_COMMAND,
     SUBSTACK_COMMAND,
+    PUBLICATION_COMMAND,
     HELP_COMMAND,
 ]

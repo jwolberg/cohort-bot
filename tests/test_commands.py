@@ -12,7 +12,7 @@ from scripts.register_commands import DiscordCreds, endpoint, register
 
 def test_command_names_match_expected() -> None:
     names = {c["name"] for c in commands.COMMANDS}
-    assert names == {"track", "repo", "branches", "user", "digest", "substack", "help"}
+    assert names == {"track", "repo", "branches", "user", "digest", "substack", "publication", "help"}
 
 
 def test_substack_declares_optional_window_with_choices() -> None:
@@ -98,7 +98,7 @@ def test_register_puts_to_guild_endpoint_with_payload() -> None:
 
     sent = _json.loads(request.content)
     assert {c["name"] for c in sent} == {
-        "track", "repo", "branches", "user", "digest", "substack", "help"
+        "track", "repo", "branches", "user", "digest", "substack", "publication", "help"
     }
 
 

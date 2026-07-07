@@ -13,6 +13,7 @@ from app.substack.client import (
     SubstackClient,
     SubstackError,
     clean_excerpt,
+    normalize_feed_url,
     slug_for,
 )
 
@@ -55,6 +56,14 @@ def _mock_feed(body: str | bytes = RSS, status: int = 200) -> None:
 def test_slug_for_strips_scheme_and_www() -> None:
     assert slug_for("https://pragmaticengineer.substack.com/feed") == "pragmaticengineer.substack.com"
     assert slug_for("https://www.custom-domain.com/feed") == "custom-domain.com"
+
+
+def test_normalize_feed_url() -> None:
+    assert normalize_feed_url("pragmaticengineer.substack.com") == "https://pragmaticengineer.substack.com/feed"
+    assert normalize_feed_url("https://ex.substack.com/feed") == "https://ex.substack.com/feed"
+    assert normalize_feed_url("https://ex.substack.com/p/some-post") == "https://ex.substack.com/feed"
+    assert normalize_feed_url("  ") == ""
+    assert normalize_feed_url("https://") == ""  # scheme but no host
 
 
 def test_clean_excerpt_strips_tags_and_truncates() -> None:
@@ -122,6 +131,32 @@ async def test_entry_missing_pubdate_is_skipped() -> None:
     async with SubstackClient() as sc:
         posts = await sc.fetch_posts_since(FEED_URL, None)
     assert [p.title for p in posts] == ["Dated"]
+
+
+@respx.mock
+async def test_fetch_publication_returns_metadata_and_posts() -> None:
+    _mock_feed()
+    async with SubstackClient() as sc:
+        view = await sc.fetch_publication(FEED_URL, limit=5)
+    assert view.slug == "ex.substack.com"
+    assert view.title == "The Example"  # from <channel><title>
+    assert [p.title for p in view.posts] == ["Second Post", "First Post"]  # newest-first
+
+
+@respx.mock
+async def test_fetch_publication_limit_caps_posts() -> None:
+    _mock_feed()
+    async with SubstackClient() as sc:
+        view = await sc.fetch_publication(FEED_URL, limit=1)
+    assert [p.title for p in view.posts] == ["Second Post"]
+
+
+@respx.mock
+async def test_fetch_publication_404_raises_not_found() -> None:
+    _mock_feed(status=404)
+    async with SubstackClient() as sc:
+        with pytest.raises(NotFoundError):
+            await sc.fetch_publication(FEED_URL)
 
 
 @respx.mock
