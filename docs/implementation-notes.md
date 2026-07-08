@@ -4,6 +4,41 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-07-08 — Tracked-user groups (cohort vs. AI leaders)
+
+Split tracked GitHub users into two fixed groups — `cohort` and `leaders` — each
+with its own admin list and its own Discord channel on the same server.
+
+- **Two fixed groups, not N (user decision):** kept it to exactly `cohort` +
+  `leaders` (constants `GROUPS`/`DEFAULT_GROUP` in `repositories.py`) rather than
+  a general groups collection. Smallest change that meets the request; a third
+  group later is a code change, which is acceptable per current scope.
+- **Backward compatible by default:** `group` is a new field on
+  `tracked_users` docs, defaulting to `cohort`. Legacy docs (no field) and any
+  caller that omits a group — including Discord `/track add` — read as `cohort`,
+  so no data migration is needed. `list_enabled`/`list_all` normalize the group
+  on read via `_with_group`.
+- **Channel per group in config:** the cohort channel stays under the original
+  `digest_channel_id` key (backward compat); the leaders channel is a new
+  `leaders_channel_id`. `channel_for_group(config, group)` resolves the mapping;
+  both keys are now editable from the admin panel.
+- **Fan-out routing:** `run_fanout` partitions users by group and posts one
+  header per non-empty group to that group's channel. A group with **no**
+  configured channel is skipped (logged `digest_group_no_channel`) and its users
+  are not enqueued — avoids posting nowhere. `process_user` reads the user's
+  stored group and resolves the channel from it (this also removed a redundant
+  Firestore read — it now reads the user doc once instead of a separate
+  `get_cursor`).
+- **Re-add moves a user between groups:** re-adding an existing user updates its
+  `group` (still preserves `created_at`/`last_cursor`), so reassignment needs no
+  separate endpoint.
+- **Out of scope:** Substack publications remain a single list posting to the
+  cohort/default channel; `/track` gained no group option (admin panel manages
+  groups). Follow-up if wanted: a `group` option on `/track add`.
+- **Validation:** full suite green (157 passed) against the Firestore emulator;
+  `ruff` clean on all changed files (3 remaining ruff warnings are pre-existing
+  in untouched files: `app/github/client.py`, `tests/test_commands.py`).
+
 ## 2026-07-03 — Substack publication tracking (S1–S7)
 
 Implemented the second content source (Substack) per `docs/spec.md` +

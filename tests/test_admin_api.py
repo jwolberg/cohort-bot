@@ -97,8 +97,39 @@ async def test_users_crud_shares_store_with_track(wired) -> None:
         assert (await ac.post("/admin/api/users", json={"username": "octocat"}, headers=AUTH)).status_code == 200
         listed = (await ac.get("/admin/api/users", headers=AUTH)).json()
         assert listed["users"][0]["username"] == "octocat"
+        # A user added without a group defaults to the cohort list.
+        assert listed["users"][0]["group"] == "cohort"
         assert (await ac.delete("/admin/api/users/octocat", headers=AUTH)).status_code == 200
         assert (await ac.get("/admin/api/users", headers=AUTH)).json()["users"] == []
+
+
+async def test_users_are_partitioned_by_group(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        await ac.post("/admin/api/users", json={"username": "octocat", "group": "cohort"}, headers=AUTH)
+        await ac.post("/admin/api/users", json={"username": "karpathy", "group": "leaders"}, headers=AUTH)
+        users = (await ac.get("/admin/api/users", headers=AUTH)).json()["users"]
+    by_group = {u["username"]: u["group"] for u in users}
+    assert by_group == {"octocat": "cohort", "karpathy": "leaders"}
+
+
+async def test_add_user_rejects_unknown_group(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        resp = await ac.post(
+            "/admin/api/users", json={"username": "octocat", "group": "bogus"}, headers=AUTH
+        )
+    assert resp.status_code == 400
+
+
+async def test_re_add_moves_user_between_groups(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        await ac.post("/admin/api/users", json={"username": "octocat", "group": "cohort"}, headers=AUTH)
+        await ac.post("/admin/api/users", json={"username": "octocat", "group": "leaders"}, headers=AUTH)
+        users = (await ac.get("/admin/api/users", headers=AUTH)).json()["users"]
+    assert len(users) == 1
+    assert users[0]["group"] == "leaders"
 
 
 async def test_duplicate_add_is_idempotent(wired) -> None:
@@ -115,12 +146,18 @@ async def test_config_get_and_put(wired) -> None:
     async with _ac(app) as ac:
         resp = await ac.put(
             "/admin/api/config",
-            json={"digest_channel_id": "999", "digest_hour_utc": 9, "admin_role_ids": ["r1"]},
+            json={
+                "digest_channel_id": "999",
+                "leaders_channel_id": "888",
+                "digest_hour_utc": 9,
+                "admin_role_ids": ["r1"],
+            },
             headers=AUTH,
         )
         assert resp.status_code == 200
         got = (await ac.get("/admin/api/config", headers=AUTH)).json()
     assert got["digest_channel_id"] == "999"
+    assert got["leaders_channel_id"] == "888"
     assert got["digest_hour_utc"] == 9
     assert got["admin_role_ids"] == ["r1"]
 

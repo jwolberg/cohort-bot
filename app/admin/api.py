@@ -19,7 +19,12 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 
 from app.config import Settings, get_settings
-from app.store.repositories import Repositories, get_repositories
+from app.store.repositories import (
+    DEFAULT_GROUP,
+    GROUPS,
+    Repositories,
+    get_repositories,
+)
 from app.substack.client import normalize_feed_url, slug_for
 from app.tasks.queue import TaskEnqueuer
 
@@ -30,8 +35,13 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # IAP signs its assertion with these rotating keys (distinct from OAuth certs).
 IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
 
-# Config keys the panel may edit.
-_EDITABLE_CONFIG = ("digest_channel_id", "digest_hour_utc", "admin_role_ids")
+# Config keys the panel may edit (one channel per tracked-user group).
+_EDITABLE_CONFIG = (
+    "digest_channel_id",
+    "leaders_channel_id",
+    "digest_hour_utc",
+    "admin_role_ids",
+)
 
 
 def verify_iap_jwt(assertion: str, audience: str) -> dict[str, Any]:
@@ -73,7 +83,16 @@ def get_enqueuer() -> TaskEnqueuer:
 @router.get("/api/users", dependencies=[Depends(require_admin)])
 async def list_users(repos: Repositories = Depends(get_repos)) -> dict[str, Any]:
     users = await repos.tracked_users.list_enabled()
-    return {"users": [{"username": u["username"], "added_by": u.get("added_by", "")} for u in users]}
+    return {
+        "users": [
+            {
+                "username": u["username"],
+                "added_by": u.get("added_by", ""),
+                "group": u.get("group") or DEFAULT_GROUP,
+            }
+            for u in users
+        ]
+    }
 
 
 @router.post("/api/users", dependencies=[Depends(require_admin)])
@@ -83,8 +102,11 @@ async def add_user(
     username = (payload.get("username") or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="username required")
-    await repos.tracked_users.add(username, added_by="admin-panel")
-    return {"status": "ok", "username": username}
+    group = (payload.get("group") or DEFAULT_GROUP).strip()
+    if group not in GROUPS:
+        raise HTTPException(status_code=400, detail=f"group must be one of {', '.join(GROUPS)}")
+    await repos.tracked_users.add(username, added_by="admin-panel", group=group)
+    return {"status": "ok", "username": username, "group": group}
 
 
 @router.delete("/api/users/{username}", dependencies=[Depends(require_admin)])

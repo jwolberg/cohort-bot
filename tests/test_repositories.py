@@ -31,6 +31,22 @@ async def test_duplicate_add_is_idempotent(repos) -> None:
     assert enabled[0]["added_by"] == "admin#1"
 
 
+async def test_add_user_stores_group_and_defaults_to_cohort(repos) -> None:
+    await repos.tracked_users.add("octocat", added_by="admin#1")  # no group → cohort
+    await repos.tracked_users.add("karpathy", added_by="admin#1", group="leaders")
+    enabled = {u["username"]: u["group"] for u in await repos.tracked_users.list_enabled()}
+    assert enabled == {"octocat": "cohort", "karpathy": "leaders"}
+
+
+async def test_re_add_updates_group_preserving_metadata(repos) -> None:
+    await repos.tracked_users.add("octocat", added_by="admin#1", group="cohort")
+    await repos.tracked_users.add("octocat", added_by="admin#2", group="leaders")
+    enabled = await repos.tracked_users.list_enabled()
+    assert len(enabled) == 1
+    assert enabled[0]["group"] == "leaders"  # re-add moved the group
+    assert enabled[0]["added_by"] == "admin#1"  # original metadata preserved
+
+
 async def test_remove_excludes_from_list_enabled(repos) -> None:
     await repos.tracked_users.add("octocat", added_by="admin#1")
     await repos.tracked_users.add("hubot", added_by="admin#1")
@@ -161,6 +177,7 @@ async def test_config_defaults_then_update(repos) -> None:
     # Missing config returns defaults.
     config = await repos.config.get()
     assert config["digest_channel_id"] == ""
+    assert config["leaders_channel_id"] == ""
     assert config["admin_role_ids"] == []
 
     await repos.config.update(

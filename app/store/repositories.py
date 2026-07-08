@@ -30,11 +30,36 @@ PROCESSED_TTL_DAYS = 90
 
 CONFIG_SINGLETON_ID = "singleton"
 
+# Tracked users are partitioned into two fixed groups, each posting its digest to
+# its own Discord channel (same server). "cohort" is the default so existing docs
+# (written before groups existed) and callers that omit a group read as cohort.
+GROUPS: tuple[str, ...] = ("cohort", "leaders")
+DEFAULT_GROUP = "cohort"
+
+# Group → config key holding that group's Discord channel id. The cohort channel
+# stays under the original ``digest_channel_id`` key for backward compatibility.
+_GROUP_CHANNEL_KEYS: dict[str, str] = {
+    "cohort": "digest_channel_id",
+    "leaders": "leaders_channel_id",
+}
+
 _DEFAULT_CONFIG: dict[str, Any] = {
     "digest_channel_id": "",
+    "leaders_channel_id": "",
     "digest_hour_utc": 13,
     "admin_role_ids": [],
 }
+
+
+def channel_for_group(config: dict[str, Any], group: str) -> str:
+    """Return the Discord channel id configured for ``group`` (or "" if unset)."""
+    key = _GROUP_CHANNEL_KEYS.get(group, _GROUP_CHANNEL_KEYS[DEFAULT_GROUP])
+    return config.get(key) or ""
+
+
+def _normalize_group(group: str | None) -> str:
+    """Coerce a stored/absent group to a known group (defaults to cohort)."""
+    return group if group in GROUPS else DEFAULT_GROUP
 
 
 def _encode(repo: str) -> str:
@@ -54,18 +79,25 @@ class TrackedUsersRepo:
     def __init__(self, client: AsyncClient) -> None:
         self._col = client.collection(self.COLLECTION)
 
-    async def add(self, username: str, added_by: str) -> None:
-        """Add a user, or re-enable an existing one. Idempotent."""
+    async def add(self, username: str, added_by: str, *, group: str = DEFAULT_GROUP) -> None:
+        """Add a user, or re-enable an existing one. Idempotent.
+
+        A re-add re-enables the user, preserves ``created_at``/``last_cursor``, and
+        updates the ``group`` — so re-adding is also how an admin moves a user
+        between the cohort and leaders lists.
+        """
+        group = _normalize_group(group)
         doc = self._col.document(username)
         snapshot = await doc.get()
         if snapshot.exists:
             # Re-adding an existing user re-enables it; created_at/cursor stay.
-            await doc.set({"enabled": True}, merge=True)
+            await doc.set({"enabled": True, "group": group}, merge=True)
             return
         await doc.set(
             {
                 "username": username,
                 "enabled": True,
+                "group": group,
                 "added_by": added_by,
                 "created_at": SERVER_TIMESTAMP,
                 "last_cursor": None,
@@ -80,12 +112,18 @@ class TrackedUsersRepo:
         snapshot = await self._col.document(username).get()
         return snapshot.to_dict() if snapshot.exists else None
 
+    @staticmethod
+    def _with_group(data: dict[str, Any]) -> dict[str, Any]:
+        """Ensure a user dict carries a normalized ``group`` (legacy docs → cohort)."""
+        data["group"] = _normalize_group(data.get("group"))
+        return data
+
     async def list_enabled(self) -> list[dict[str, Any]]:
         query = self._col.where(filter=FieldFilter("enabled", "==", True))
-        return [doc.to_dict() async for doc in query.stream()]
+        return [self._with_group(doc.to_dict()) async for doc in query.stream()]
 
     async def list_all(self) -> list[dict[str, Any]]:
-        return [doc.to_dict() async for doc in self._col.stream()]
+        return [self._with_group(doc.to_dict()) async for doc in self._col.stream()]
 
     async def set_cursor(self, username: str, cursor: datetime) -> None:
         await self._col.document(username).set(

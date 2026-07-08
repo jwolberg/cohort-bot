@@ -23,7 +23,13 @@ from app.digest import formatter
 from app.discord.rest import DiscordREST
 from app.github.client import GitHubClient, NotFoundError
 from app.logging import get_logger, log_event
-from app.store.repositories import Repositories, get_repositories
+from app.store.repositories import (
+    DEFAULT_GROUP,
+    GROUPS,
+    Repositories,
+    channel_for_group,
+    get_repositories,
+)
 from app.substack.client import PostRef, SubstackClient, SubstackError
 from app.summarizer.claude import ClaudeSummarizer
 from app.tasks.queue import EnqueueError, TaskEnqueuer
@@ -33,6 +39,18 @@ logger = get_logger(__name__)
 # Cloud Monitoring alerts on the absence of this log over a ~26h window
 # (deploy/setup.sh creates the log-based metric + alert policy, U12).
 HEARTBEAT_EVENT = "digest_heartbeat"
+
+# Per-group digest header title. Each group posts to its own channel, so the
+# header names which list this is (§groups).
+_GROUP_HEADER_TITLE = {
+    "cohort": "📊 **GitHub Daily Digest**",
+    "leaders": "🧠 **AI Industry Leaders**",
+}
+
+
+def _group_header(group: str, date_label: str, count: int) -> str:
+    title = _GROUP_HEADER_TITLE.get(group, _GROUP_HEADER_TITLE[DEFAULT_GROUP])
+    return f"{title} — {date_label} · {count} tracked"
 
 
 @dataclass
@@ -270,28 +288,45 @@ class DigestPipeline:
         """
         started = time.monotonic()
         config = await self._repos.config.get()
-        channel = config.get("digest_channel_id", "")
         users = await self._repos.tracked_users.list_enabled()
         publications = await self._repos.tracked_publications.list_enabled()
 
+        # Partition users by group; each group posts its own header to its own
+        # channel. A group with no configured channel is skipped (logged) so its
+        # per-user tasks aren't enqueued only to post nowhere.
+        by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for user in users:
+            by_group[user.get("group") or DEFAULT_GROUP].append(user)
+
+        today = datetime.now(timezone.utc).strftime("%B %-d")
         posted = False
-        if channel and users:
-            today = datetime.now(timezone.utc).strftime("%B %-d")
+        enqueued = 0
+        for group in GROUPS:
+            group_users = by_group.get(group, [])
+            if not group_users:
+                continue
+            channel = channel_for_group(config, group)
+            if not channel:
+                logger.warning(
+                    "digest_group_no_channel",
+                    extra={"group": group, "users": len(group_users)},
+                )
+                continue
             await self._rest.post_channel_message(
-                channel, content=f"📊 **GitHub Daily Digest** — {today} · {len(users)} tracked"
+                channel, content=_group_header(group, today, len(group_users))
             )
             posted = True
-
-        # Best-effort per user: a single enqueue failure must not 500 the job
-        # (Cloud Scheduler would retry it and re-post the header). Failed users
-        # are logged and simply miss this run.
-        enqueued = 0
-        for user in users:
-            try:
-                await self._enqueuer.enqueue_digest_user({"username": user["username"]})
-                enqueued += 1
-            except EnqueueError:
-                logger.warning("digest_user_enqueue_failed", extra={"username": user["username"]})
+            # Best-effort per user: a single enqueue failure must not 500 the job
+            # (Cloud Scheduler would retry it and re-post the header). Failed
+            # users are logged and simply miss this run.
+            for user in group_users:
+                try:
+                    await self._enqueuer.enqueue_digest_user({"username": user["username"]})
+                    enqueued += 1
+                except EnqueueError:
+                    logger.warning(
+                        "digest_user_enqueue_failed", extra={"username": user["username"]}
+                    )
 
         # Fan out one Substack task per enabled publication (same best-effort
         # rule; a publication with no new posts simply posts nothing — A3).
@@ -324,9 +359,11 @@ class DigestPipeline:
         Returns True if a section was posted, False if the user had no new
         activity. Raises (for Cloud Tasks retry) if the post fails.
         """
+        user = await self._repos.tracked_users.get(username)
+        group = (user or {}).get("group") or DEFAULT_GROUP
         config = await self._repos.config.get()
-        channel = config.get("digest_channel_id", "")
-        since = await self._repos.tracked_users.get_cursor(username)
+        channel = channel_for_group(config, group)
+        since = (user or {}).get("last_cursor")
 
         async with self._gh_factory() as gh:
             section = await self.compute_section(gh, username, since)

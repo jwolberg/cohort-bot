@@ -24,22 +24,43 @@
     <div x-show="error" x-text="error" class="mb-4 text-sm text-red-600"></div>
     <div x-show="notice" x-text="notice" class="mb-4 text-sm text-green-700"></div>
 
-    <!-- Tracked users -->
+    <!-- Cohort members (group: cohort) -->
     <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
-      <h2 class="text-lg font-medium mb-3">Tracked users</h2>
-      <form @submit.prevent="addUser()" class="flex gap-2 mb-3">
-        <input x-model="newUser" placeholder="github-username"
+      <h2 class="text-lg font-medium mb-1">Cohort members</h2>
+      <p class="text-xs text-slate-500 mb-3">Posted to the cohort channel.</p>
+      <form @submit.prevent="addUser('cohort')" class="flex gap-2 mb-3">
+        <input x-model="newCohortUser" placeholder="github-username"
                class="flex-1 border rounded px-3 py-2 text-sm" />
         <button class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Add</button>
       </form>
       <ul class="divide-y">
-        <template x-for="u in users" :key="u.username">
+        <template x-for="u in groupUsers('cohort')" :key="u.username">
           <li class="flex items-center justify-between py-2">
             <span x-text="u.username" class="font-mono text-sm"></span>
             <button @click="removeUser(u.username)" class="text-red-600 text-sm">Remove</button>
           </li>
         </template>
-        <li x-show="users.length === 0" class="py-2 text-sm text-slate-400">No tracked users.</li>
+        <li x-show="groupUsers('cohort').length === 0" class="py-2 text-sm text-slate-400">No cohort members.</li>
+      </ul>
+    </section>
+
+    <!-- AI industry leaders (group: leaders) -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-1">AI industry leaders</h2>
+      <p class="text-xs text-slate-500 mb-3">Posted to the leaders channel.</p>
+      <form @submit.prevent="addUser('leaders')" class="flex gap-2 mb-3">
+        <input x-model="newLeaderUser" placeholder="github-username"
+               class="flex-1 border rounded px-3 py-2 text-sm" />
+        <button class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Add</button>
+      </form>
+      <ul class="divide-y">
+        <template x-for="u in groupUsers('leaders')" :key="u.username">
+          <li class="flex items-center justify-between py-2">
+            <span x-text="u.username" class="font-mono text-sm"></span>
+            <button @click="removeUser(u.username)" class="text-red-600 text-sm">Remove</button>
+          </li>
+        </template>
+        <li x-show="groupUsers('leaders').length === 0" class="py-2 text-sm text-slate-400">No AI industry leaders.</li>
       </ul>
     </section>
 
@@ -69,8 +90,11 @@
     <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
       <h2 class="text-lg font-medium mb-3">Digest config</h2>
       <div class="grid grid-cols-2 gap-3 mb-3">
-        <label class="block text-sm">Channel ID
+        <label class="block text-sm">Cohort channel ID
           <input x-model="config.digest_channel_id" class="w-full border rounded px-3 py-2 text-sm mt-1" />
+        </label>
+        <label class="block text-sm">Leaders channel ID
+          <input x-model="config.leaders_channel_id" class="w-full border rounded px-3 py-2 text-sm mt-1" />
         </label>
         <label class="block text-sm">Hour (UTC)
           <input type="number" x-model.number="config.digest_hour_utc" class="w-full border rounded px-3 py-2 text-sm mt-1" />
@@ -95,7 +119,7 @@
     function admin() {
       return {
         token: '', users: [], publications: [], config: {}, adminRoles: '',
-        newUser: '', newFeed: '', error: '', notice: '',
+        newCohortUser: '', newLeaderUser: '', newFeed: '', error: '', notice: '',
         init() {
           this.token = localStorage.getItem('adminToken') || '';
           this.loadUsers();
@@ -120,15 +144,20 @@
         async loadUsers() {
           try { this.users = (await this.api('GET', '/users')).users; } catch (e) {}
         },
+        groupUsers(group) {
+          return this.users.filter(u => (u.group || 'cohort') === group);
+        },
         async loadConfig() {
           try {
             this.config = await this.api('GET', '/config');
             this.adminRoles = (this.config.admin_role_ids || []).join(', ');
           } catch (e) {}
         },
-        async addUser() {
-          if (!this.newUser) return;
-          try { await this.api('POST', '/users', { username: this.newUser }); this.newUser = ''; this.loadUsers(); } catch (e) {}
+        async addUser(group) {
+          const model = group === 'leaders' ? 'newLeaderUser' : 'newCohortUser';
+          const username = this[model];
+          if (!username) return;
+          try { await this.api('POST', '/users', { username, group }); this[model] = ''; this.loadUsers(); } catch (e) {}
         },
         async removeUser(username) {
           try { await this.api('DELETE', '/users/' + encodeURIComponent(username)); this.loadUsers(); } catch (e) {}
@@ -148,6 +177,7 @@
           try {
             this.config = await this.api('PUT', '/config', {
               digest_channel_id: this.config.digest_channel_id,
+              leaders_channel_id: this.config.leaders_channel_id,
               digest_hour_utc: this.config.digest_hour_utc,
               admin_role_ids: roles,
             });

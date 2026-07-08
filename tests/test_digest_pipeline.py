@@ -18,6 +18,7 @@ from app.digest.pipeline import (
     UserSection,
     _is_low_signal,
 )
+from app.store.repositories import channel_for_group
 from app.substack.client import PostRef, SubstackError
 from app.discord import interactions as interactions_module
 from app.github.client import GitHubClient
@@ -158,6 +159,15 @@ class FakeSubstackClient:
 )
 def test_is_low_signal_true(message) -> None:
     assert _is_low_signal(message) is True
+
+
+def test_channel_for_group_maps_each_group_to_its_channel() -> None:
+    config = {"digest_channel_id": "cohort-chan", "leaders_channel_id": "leaders-chan"}
+    assert channel_for_group(config, "cohort") == "cohort-chan"
+    assert channel_for_group(config, "leaders") == "leaders-chan"
+    # An unset channel resolves to ""; an unknown group falls back to cohort's.
+    assert channel_for_group({}, "leaders") == ""
+    assert channel_for_group(config, "unknown") == "cohort-chan"
 
 
 @pytest.mark.parametrize(
@@ -484,6 +494,67 @@ async def test_fanout_enqueues_one_task_per_enabled_user(firestore_client) -> No
     assert {p["username"] for p in enqueuer.digest_users} == {"jay", "sarah"}
     assert len(rest.posts) == 1  # header posted once
     assert "GitHub Daily Digest" in rest.posts[0]["content"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_routes_groups_to_distinct_channels(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update(
+        {"digest_channel_id": "cohort-chan", "leaders_channel_id": "leaders-chan"}
+    )
+    await repos.tracked_users.add("jay", added_by="a", group="cohort")
+    await repos.tracked_users.add("karpathy", added_by="a", group="leaders")
+    enqueuer = FakeEnqueuer()
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest, enqueuer)
+
+    await pipeline.run_fanout()
+
+    # One header per non-empty group, each to its own channel.
+    headers = {p["channel"]: p["content"] for p in rest.posts if p["content"]}
+    assert set(headers) == {"cohort-chan", "leaders-chan"}
+    assert "GitHub Daily Digest" in headers["cohort-chan"]
+    assert "AI Industry Leaders" in headers["leaders-chan"]
+    # Every user is still enqueued exactly once.
+    assert {p["username"] for p in enqueuer.digest_users} == {"jay", "karpathy"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_skips_group_with_no_channel(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    # Only the cohort channel is configured; the leaders group has none.
+    await repos.config.update({"digest_channel_id": "cohort-chan"})
+    await repos.tracked_users.add("jay", added_by="a", group="cohort")
+    await repos.tracked_users.add("karpathy", added_by="a", group="leaders")
+    enqueuer = FakeEnqueuer()
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest, enqueuer)
+
+    await pipeline.run_fanout()
+
+    # Leaders has no channel → no header, and its users are not enqueued.
+    assert [p["channel"] for p in rest.posts] == ["cohort-chan"]
+    assert {p["username"] for p in enqueuer.digest_users} == {"jay"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_user_posts_to_its_group_channel(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update(
+        {"digest_channel_id": "cohort-chan", "leaders_channel_id": "leaders-chan"}
+    )
+    await repos.tracked_users.add("karpathy", added_by="a", group="leaders")
+    _mock_user("karpathy", [_push_event("o/r", [("s1", "Add feature")])])
+    _mock_repo("o/r")
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest)
+
+    posted = await pipeline.process_user("karpathy")
+    assert posted is True
+    assert rest.posts[0]["channel"] == "leaders-chan"  # routed by the user's group
 
 
 @respx.mock
