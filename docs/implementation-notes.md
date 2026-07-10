@@ -4,6 +4,26 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-07-10 — Linked repo titles in digest embeds
+
+Repo names in digest embeds now link to the repo on GitHub, matching how the
+username already links to the profile.
+
+- **Link lives in the field value, not the field name (Discord constraint):**
+  Discord renders masked links (`[text](url)`) in embed descriptions and field
+  values, but not in field names or titles. The per-user embed keys each field
+  by repo name, so the clickable `[**owner/repo**](https://github.com/owner/repo)`
+  leads the field value instead. The repo name therefore appears twice per
+  field — plain as the header, linked as the first body line. User chose this
+  over moving the repos into the description, which would have linked the
+  header itself at the cost of the field layout.
+- **Batched `/digest` needed no layout change** — `_repo_lines` already rendered
+  repo names inside a field value, so the bold name simply became a masked link.
+- **Truncation caveat:** `_repo_lines` still hard-slices at 1024 chars, so a
+  user with many repos can have a trailing link cut mid-URL (it would render as
+  raw text). Pre-existing behavior (it could already cut mid-`**bold**`); left
+  alone to keep the change small.
+
 ## 2026-07-08 — Tracked-user groups (cohort vs. AI leaders)
 
 Split tracked GitHub users into two fixed groups — `cohort` and `leaders` — each

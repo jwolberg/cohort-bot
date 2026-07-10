@@ -10,7 +10,12 @@ import respx
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
-from app.digest.formatter import format_digest, format_publication_section, format_substack
+from app.digest.formatter import (
+    format_digest,
+    format_publication_section,
+    format_substack,
+    format_user_section,
+)
 from app.digest.pipeline import (
     DigestPipeline,
     PublicationSection,
@@ -632,6 +637,26 @@ def test_format_digest_paginates_beyond_field_limit() -> None:
 def test_format_digest_empty_reports_no_activity() -> None:
     embeds = format_digest("Today", [])
     assert "No activity" in embeds[0]["description"]
+
+
+def test_format_user_section_links_each_repo_title() -> None:
+    section = UserSection(
+        "jay", 3, [RepoSection("acme/api", 3, "desc", "Backend work")], {}, None
+    )
+    embed = format_user_section(section)
+    # Field names render no markdown, so the clickable title leads the value.
+    assert embed["fields"][0]["name"] == "acme/api"
+    assert embed["fields"][0]["value"].startswith(
+        "[**acme/api**](https://github.com/acme/api)"
+    )
+    assert "Backend work" in embed["fields"][0]["value"]
+
+
+def test_format_digest_links_each_repo_title() -> None:
+    embeds = format_digest("July 2", [_section("jay")])
+    value = embeds[0]["fields"][0]["value"]
+    assert value.startswith("[**o/r**](https://github.com/o/r)")
+    assert "Backend work" in value
 
 
 # --- Digest task endpoints (OIDC) ---
