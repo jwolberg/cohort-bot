@@ -22,10 +22,18 @@ MAX_EMBED_TITLE_CHARS = 250  # Discord field-name limit is 256
 MAX_EMBED_TOTAL_CHARS = 5500
 
 
+def _repo_link(repo: str) -> str:
+    """Clickable repo title. Discord renders masked links in embed descriptions
+    and field values, but not in field names — so the link leads the value."""
+    return f"[**{repo}**](https://github.com/{repo})"
+
+
 def _repo_lines(section: "UserSection") -> str:
     parts = []
     for repo in section.repos:
-        parts.append(f"**{repo.repo}** — {repo.count} commit{'s' if repo.count != 1 else ''}\n{repo.summary}")
+        parts.append(
+            f"{_repo_link(repo.repo)} — {repo.count} commit{'s' if repo.count != 1 else ''}\n{repo.summary}"
+        )
     value = "\n\n".join(parts)
     return value[:MAX_EMBED_VALUE_CHARS]
 
@@ -35,7 +43,7 @@ def format_user_section(section: "UserSection") -> dict[str, Any]:
     fields = [
         responses.field(
             repo.repo,
-            f"• {repo.count} commit{'s' if repo.count != 1 else ''}\n{repo.summary}"[:MAX_EMBED_VALUE_CHARS],
+            f"{_repo_link(repo.repo)}\n• {repo.count} commit{'s' if repo.count != 1 else ''}\n{repo.summary}"[:MAX_EMBED_VALUE_CHARS],
         )
         for repo in section.repos
     ]
