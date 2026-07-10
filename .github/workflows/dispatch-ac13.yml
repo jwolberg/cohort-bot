@@ -1,0 +1,7 @@
+name: dispatch-ac13
+on: pull_request
+jobs:
+  ok:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "triggered by ${{ github.event_name }} / actor ${{ github.actor }}"
