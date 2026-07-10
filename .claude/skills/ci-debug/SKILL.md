@@ -1,5 +1,5 @@
 ---
-name: debug
+name: ci-debug
 description: Reproduce the failure, find the root cause, and push a minimal fix to the open PR
 ---
 
