@@ -1,0 +1,41 @@
+name: Claude Code
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Push Claude's branch. The PR is opened by Dispatch, not here, so
+      # `pull-requests: write` is deliberately absent (ADR-0006 [2]).
+      contents: write
+      issues: write # the tracking comment claude-code-action posts
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        id: claude
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Pass the default GITHUB_TOKEN *explicitly* (ADR-0006 [2]). This input has
+          # no default: omit it and claude-code-action performs an App token exchange
+          # against Anthropic's Claude GitHub App, which most repos do not have
+          # installed, and 401s (observed — #25). `github.token` is all the branch
+          # push needs, and it writes no credential into the target repo.
+          github_token: ${{ github.token }}
+          # Dispatch opens the PR with its App installation token, which triggers
+          # on: pull_request CI without an approval gate (observed, ADR-0006 [8]).
+          #
+          # Do NOT set `prompt:` here. A static prompt forces automation mode, which
+          # IGNORES the @claude comment. Omitting it enables interactive (mention)
+          # mode: Claude reads the comment, runs it (incl. project skills under
+          # .claude/skills/), posts a tracking comment, and pushes a branch.
+          claude_args: |
+            --append-system-prompt "Implement the change on a branch and commit it; Dispatch opens the pull request from your branch. Reference the issue with 'Fixes #<n>'."
