@@ -1,5 +1,5 @@
 ---
-name: plan
+name: ci-plan
 description: Post a step-by-step implementation plan for this issue as a comment — no code changes, no PR
 ---
 

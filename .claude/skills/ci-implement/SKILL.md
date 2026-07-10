@@ -1,5 +1,5 @@
 ---
-name: implement
+name: ci-implement
 description: Implement the issue and open a pull request that closes it on merge
 ---
 
