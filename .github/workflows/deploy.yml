@@ -1,0 +1,43 @@
+# Deploy to Cloud Run on every merge to main.
+#
+# Authenticates to Google Cloud keylessly via Workload Identity Federation — no
+# service-account key is stored as a repo secret. The WIF pool/provider trusts
+# only GitHub's OIDC token for this exact repo on refs/heads/main (see the
+# `github-cohort-bot` provider under the `github-actions` pool in project
+# cohort-bot-1), and the bound service account (`github-deployer`) can only
+# submit Cloud Build jobs — it does not build or deploy anything itself; that
+# runs under Cloud Build's own default service account, same as a manual
+# `gcloud builds submit` run locally.
+#
+# The `production` GitHub Environment gates the actual deploy behind a
+# required-reviewer approval — merging to main does not deploy by itself, it
+# opens the door; someone still has to click Approve.
+name: Deploy
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # required for WIF's OIDC token exchange
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: cohort-bot-1
+          workload_identity_provider: projects/587338514666/locations/global/workloadIdentityPools/github-actions/providers/github-cohort-bot
+          service_account: github-deployer@cohort-bot-1.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build and deploy
+        run: |
+          gcloud builds submit --config deploy/cloudbuild.yaml \
+            --project cohort-bot-1 \
+            --substitutions=_REGION=us-central1,_TAG="${GITHUB_SHA::7}"
