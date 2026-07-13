@@ -42,7 +42,7 @@ def format_user_section(section: "UserSection") -> dict[str, Any]:
     """One embed for a single user's daily activity."""
     fields = [
         responses.field(
-            repo.repo,
+            "​",  # zero-width space: the linked repo title in the value is the sole heading
             f"{_repo_link(repo.repo)}\n• {repo.count} commit{'s' if repo.count != 1 else ''}\n{repo.summary}"[:MAX_EMBED_VALUE_CHARS],
         )
         for repo in section.repos

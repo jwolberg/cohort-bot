@@ -644,8 +644,8 @@ def test_format_user_section_links_each_repo_title() -> None:
         "jay", 3, [RepoSection("acme/api", 3, "desc", "Backend work")], {}, None
     )
     embed = format_user_section(section)
-    # Field names render no markdown, so the clickable title leads the value.
-    assert embed["fields"][0]["name"] == "acme/api"
+    # Field name must not duplicate the repo slug as a plain-text title above the link.
+    assert embed["fields"][0]["name"] != "acme/api"
     assert embed["fields"][0]["value"].startswith(
         "[**acme/api**](https://github.com/acme/api)"
     )
