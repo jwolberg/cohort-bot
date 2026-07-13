@@ -30,6 +30,13 @@ jobs:
           # installed, and 401s (observed — #25). `github.token` is all the branch
           # push needs, and it writes no credential into the target repo.
           github_token: ${{ github.token }}
+          # This deployment has a GitHub App registered (dispatch-jay-prod), so Dispatch
+          # files issues with the App installation token and they're authored by
+          # `dispatch-jay-prod[bot]` (type: Bot) rather than a human PAT.
+          # claude-code-action refuses a bot-initiated trigger unless allow-listed, so
+          # without this the build fails immediately with "Workflow initiated by
+          # non-human actor" even though the issue filed fine (dispatch#29).
+          allowed_bots: "dispatch-jay-prod[bot]"
           # Dispatch opens the PR with its App installation token, which triggers
           # on: pull_request CI without an approval gate (observed, ADR-0006 [8]).
           #
