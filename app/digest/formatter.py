@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any
 from app.discord import responses
 
 if TYPE_CHECKING:
-    from app.digest.pipeline import PublicationSection, UserSection
+    from app.digest.pipeline import (
+        PublicationSection,
+        TrackedRepoSection,
+        UserSection,
+    )
 
 # Discord embed limits (kept conservative).
 MAX_FIELDS_PER_EMBED = 25
@@ -89,6 +93,27 @@ def format_digest(date_label: str, sections: list["UserSection"]) -> list[dict[s
         description = header if i == 0 else None
         embeds.append(responses.embed(title, description=description, fields=chunk))
     return embeds
+
+
+# --- Tracked repos (repo-centric daily scan) ---
+
+
+def format_repo_section(section: "TrackedRepoSection") -> dict[str, Any]:
+    """One 📦 embed for a single tracked repo's new commits (scheduled per-repo).
+
+    Mirrors :func:`format_user_section`'s per-repo block: an AI summary followed
+    by the latest commit subjects, under a linked repo title.
+    """
+    n = section.count
+    lines = "\n".join(f"• {m}" for m in section.latest_messages)
+    value = (section.summary + (f"\n{lines}" if lines else ""))[:MAX_EMBED_VALUE_CHARS]
+    fields = [responses.field("​", value)] if value else []
+    return responses.embed(
+        f"📦 {section.repo}",
+        description=f"{n} new commit{'s' if n != 1 else ''}",
+        url=f"https://github.com/{section.repo}",
+        fields=fields,
+    )
 
 
 # --- Substack (native excerpt, no LLM summarization) ---

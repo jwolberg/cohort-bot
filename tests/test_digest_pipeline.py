@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.digest.formatter import (
     format_digest,
     format_publication_section,
+    format_repo_section,
     format_substack,
     format_user_section,
 )
@@ -20,6 +21,7 @@ from app.digest.pipeline import (
     DigestPipeline,
     PublicationSection,
     RepoSection,
+    TrackedRepoSection,
     UserSection,
     _is_low_signal,
 )
@@ -43,6 +45,7 @@ class FakeEnqueuer:
     def __init__(self):
         self.digest_users: list[dict] = []
         self.substack_pubs: list[dict] = []
+        self.digest_repos: list[dict] = []
 
     async def enqueue_digest_user(self, payload):
         self.digest_users.append(payload)
@@ -51,6 +54,10 @@ class FakeEnqueuer:
     async def enqueue_substack_publication(self, payload):
         self.substack_pubs.append(payload)
         return "task/2"
+
+    async def enqueue_digest_repo(self, payload):
+        self.digest_repos.append(payload)
+        return "task/3"
 
 
 class FakeRest:
@@ -103,6 +110,27 @@ def _mock_repo(repo, description="A repo"):
             "description": description, "language": "Python",
             "stargazers_count": 1, "forks_count": 0, "default_branch": "main",
         })
+    )
+
+
+def _mock_repo_commits(repo, commits, when="2026-07-02T10:00:00Z"):
+    """Mock the repo-centric list-commits API (used by tracked repos)."""
+    respx.get(f"{BASE}/repos/{repo}/commits").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "sha": s,
+                    "html_url": f"https://github.com/{repo}/commit/{s}",
+                    "commit": {
+                        "message": m,
+                        "author": {"name": "Jay", "date": when},
+                        "committer": {"date": when},
+                    },
+                }
+                for s, m in commits
+            ],
+        )
     )
 
 
@@ -464,8 +492,23 @@ async def test_on_demand_substack_lists_recent_posts(firestore_client) -> None:
     await repos.tracked_publications.add(
         "ex.substack.com", "https://ex.substack.com/feed", title="Ex", added_by="a"
     )
-    # 30d window reaches back past the July sample dates regardless of run time.
-    pipeline = _substack_pipeline(repos, FakeRest(), posts=[_post("p1", 2), _post("p2", 3)])
+    # Date the sample posts relative to *now* so they always fall inside the 30d
+    # window regardless of when the suite runs (fixed dates become stale — the
+    # window is rolling, not anchored to July).
+    now = datetime.now(timezone.utc)
+    recent = [
+        PostRef(
+            slug="ex.substack.com",
+            post_id=pid,
+            title="A post",
+            url=f"https://ex.substack.com/p/{pid}",
+            author="Writer",
+            published=now - timedelta(days=days_ago),
+            excerpt="Body",
+        )
+        for pid, days_ago in (("p1", 2), ("p2", 1))
+    ]
+    pipeline = _substack_pipeline(repos, FakeRest(), posts=recent)
     embeds = await pipeline.on_demand_substack("30d")
     assert embeds[0]["title"] == "📰 Ex"
     assert "2 posts" in embeds[0]["description"]
@@ -478,6 +521,121 @@ async def test_on_demand_substack_empty_when_no_publications(firestore_client) -
     pipeline = _substack_pipeline(repos, FakeRest(), posts=[])
     embeds = await pipeline.on_demand_substack(None)
     assert "No recent posts" in embeds[0]["description"]
+
+
+# --- Tracked repos (repo-centric daily scan) ---
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_compute_repo_section_dedups_processed_shas(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.processed_commits.record_shas("o/r", ["s1"])  # already reported
+    _mock_repo_commits("o/r", [("s1", "feat: old"), ("s2", "feat: new")])
+    _mock_repo("o/r")
+    pipeline = _pipeline(repos, FakeRest())
+
+    async with GitHubClient(get_settings().github_token, repos.repo_cache) as gh:
+        section = await pipeline.compute_repo_section(gh, "o/r", None)
+    assert section is not None
+    assert section.new_shas == ["s2"]  # s1 filtered
+    assert section.count == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_repo_posts_and_advances_cursor(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_repos.add("o/private", added_by="a")
+    await repos.tracked_repos.set_cursor(
+        "o/private", datetime(2026, 7, 1, tzinfo=timezone.utc)
+    )
+    # One signal + one low-signal commit; only the signal one is reported.
+    _mock_repo_commits("o/private", [("s1", "feat: add thing"), ("s2", "chore: noise")])
+    _mock_repo("o/private")
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest)
+
+    posted = await pipeline.process_repo("o/private")
+    assert posted is True
+    assert len(rest.posts) == 1
+    assert rest.posts[0]["channel"] == "chan"  # posts to the cohort digest channel
+    assert await repos.processed_commits.has_sha("o/private", "s1") is True
+    assert await repos.processed_commits.has_sha("o/private", "s2") is False
+    # Cursor advances to the newest commit's committer time.
+    assert await repos.tracked_repos.get_cursor("o/private") == datetime(
+        2026, 7, 2, 10, 0, tzinfo=timezone.utc
+    )
+
+    # Re-run posts nothing new (idempotent per repo).
+    assert await pipeline.process_repo("o/private") is False
+    assert len(rest.posts) == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_repo_post_failure_leaves_state(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_repos.add("o/private", added_by="a")
+    await repos.tracked_repos.set_cursor(
+        "o/private", datetime(2026, 7, 1, tzinfo=timezone.utc)
+    )
+    _mock_repo_commits("o/private", [("s1", "feat: add thing")])
+    _mock_repo("o/private")
+    pipeline = _pipeline(repos, FakeRest(fail=True))
+
+    with pytest.raises(RuntimeError):
+        await pipeline.process_repo("o/private")
+    # Post failed → SHA not recorded, cursor unchanged (retry-safe).
+    assert await repos.processed_commits.has_sha("o/private", "s1") is False
+    assert await repos.tracked_repos.get_cursor("o/private") == datetime(
+        2026, 7, 1, tzinfo=timezone.utc
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_repo_disabled_or_absent_is_noop(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    rest = FakeRest()
+    pipeline = _pipeline(repos, rest)
+    # Never added → no fetch, no post.
+    assert await pipeline.process_repo("o/ghost") is False
+    assert rest.posts == []
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_enqueues_one_task_per_tracked_repo(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_users.add("jay", added_by="a")
+    await repos.tracked_repos.add("o/a", added_by="a")
+    await repos.tracked_repos.add("o/b", added_by="a")
+    enqueuer = FakeEnqueuer()
+    pipeline = _pipeline(repos, FakeRest(), enqueuer)
+
+    await pipeline.run_fanout()
+    assert {p["repo"] for p in enqueuer.digest_repos} == {"o/a", "o/b"}
+
+
+def test_format_repo_section_renders_commits() -> None:
+    section = TrackedRepoSection(
+        repo="o/private",
+        count=2,
+        description="A private repo",
+        summary="Shipped the importer.",
+        latest_messages=["feat: add importer", "feat: wire it up"],
+    )
+    embed = format_repo_section(section)
+    assert embed["title"] == "📦 o/private"
+    assert embed["description"] == "2 new commits"
+    assert embed["url"] == "https://github.com/o/private"
+    assert "Shipped the importer." in embed["fields"][0]["value"]
+    assert "feat: add importer" in embed["fields"][0]["value"]
 
 
 # --- Fan-out ---
@@ -714,3 +872,26 @@ def test_substack_publication_dispatches_to_worker(client: TestClient, monkeypat
     resp = client.post("/tasks/substack/publication", json={"slug": "ex.substack.com"}, headers={"Authorization": "Bearer x"})
     assert resp.status_code == 200
     assert called.get("slug") == "ex.substack.com"
+
+
+def test_digest_repo_requires_oidc(client: TestClient) -> None:
+    assert client.post("/tasks/digest/repo").status_code == 401
+
+
+def test_digest_repo_missing_repo_400(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
+    resp = client.post("/tasks/digest/repo", json={}, headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 400
+
+
+def test_digest_repo_dispatches_to_worker(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
+    called = {}
+
+    async def worker(repo):
+        called["repo"] = repo
+
+    interactions_module.set_repo_worker(worker)
+    resp = client.post("/tasks/digest/repo", json={"repo": "o/private"}, headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 200
+    assert called.get("repo") == "o/private"

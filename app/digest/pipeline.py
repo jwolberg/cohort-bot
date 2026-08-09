@@ -72,6 +72,17 @@ class UserSection:
 
 
 @dataclass
+class TrackedRepoSection:
+    repo: str
+    count: int
+    description: str
+    summary: str
+    latest_messages: list[str] = dataclass_field(default_factory=list)
+    new_shas: list[str] = dataclass_field(default_factory=list)
+    new_cursor: datetime | None = None
+
+
+@dataclass
 class PublicationSection:
     slug: str
     title: str
@@ -149,6 +160,7 @@ class DigestPipeline:
         summarizer: ClaudeSummarizer,
         *,
         gh_factory: Callable[[], GitHubClient] | None = None,
+        gh_private_factory: Callable[[], GitHubClient] | None = None,
         substack_factory: Callable[[], SubstackClient] | None = None,
     ) -> None:
         self._repos = repos
@@ -157,10 +169,21 @@ class DigestPipeline:
         self._rest = rest
         self._summarizer = summarizer
         self._gh_factory = gh_factory or self._default_gh
+        self._gh_private_factory = gh_private_factory or self._default_gh_private
         self._substack_factory = substack_factory or self._default_substack
 
     def _default_gh(self) -> GitHubClient:
         return GitHubClient(self._settings.github_token, self._repos.repo_cache)
+
+    def _default_gh_private(self) -> GitHubClient:
+        """GitHub client for tracked-repo reads, authed with the private token.
+
+        Uses ``GITHUB_TOKEN_PRIVATE`` when set (a least-privilege PAT scoped to
+        the private repos) and falls back to ``GITHUB_TOKEN`` otherwise, so the
+        feature degrades gracefully when the dedicated secret isn't configured.
+        """
+        token = self._settings.github_token_private or self._settings.github_token
+        return GitHubClient(token, self._repos.repo_cache)
 
     def _default_substack(self) -> SubstackClient:
         return SubstackClient()
@@ -277,6 +300,60 @@ class DigestPipeline:
             new_cursor=new_cursor,
         )
 
+    async def compute_repo_section(
+        self, gh: GitHubClient, repo: str, since: datetime | None, *, dedup: bool = True
+    ) -> TrackedRepoSection | None:
+        """Compute one tracked repo's new commits (repo-centric counterpart to
+        :meth:`compute_section`).
+
+        Fetches commits after ``since`` directly from the repo — so private repos,
+        which never surface in a user's public Events feed, are covered. Advances
+        the cursor past everything fetched, drops low-signal commits, and (with
+        ``dedup``) filters commits already reported; ``processed_commits`` is keyed
+        by ``repo@sha`` and shared with the per-user path, so a commit is reported
+        once regardless of which path first sees it. Returns None when nothing
+        new/substantive remains.
+        """
+        commits = await gh.fetch_commits_since(repo, since)
+        if not commits:
+            return None
+
+        # Advance past EVERYTHING fetched (incl. filtered commits) so noise isn't
+        # re-scanned next run, then keep only signal commits for reporting.
+        new_cursor = max(c.timestamp for c in commits)
+        commits = [c for c in commits if not _is_low_signal(c.message)]
+        if not commits:
+            return None
+        if dedup:
+            commits = [
+                c
+                for c in commits
+                if not await self._repos.processed_commits.has_sha(repo, c.sha)
+            ]
+        if not commits:
+            return None
+
+        try:
+            info = await gh.fetch_repo(repo)
+            description = info.description
+        except NotFoundError:
+            description = ""
+        messages = [c.message for c in commits]
+        summary = await self._summarizer.summarize(
+            repo_description=description,
+            commit_messages=messages,
+            commit_count=len(commits),
+        )
+        return TrackedRepoSection(
+            repo=repo,
+            count=len(commits),
+            description=description,
+            summary=summary,
+            latest_messages=[m.splitlines()[0] for m in messages[:3] if m.strip()],
+            new_shas=[c.sha for c in commits],
+            new_cursor=new_cursor,
+        )
+
     # --- scheduled fan-out ---
 
     async def run_fanout(self) -> int:
@@ -290,6 +367,7 @@ class DigestPipeline:
         config = await self._repos.config.get()
         users = await self._repos.tracked_users.list_enabled()
         publications = await self._repos.tracked_publications.list_enabled()
+        tracked_repos = await self._repos.tracked_repos.list_enabled()
 
         # Partition users by group; each group posts its own header to its own
         # channel. A group with no configured channel is skipped (logged) so its
@@ -338,12 +416,24 @@ class DigestPipeline:
             except EnqueueError:
                 logger.warning("substack_pub_enqueue_failed", extra={"slug": pub["slug"]})
 
+        # Fan out one task per enabled tracked repo (private/other repos not
+        # visible via users' public events). Same best-effort rule; a repo with no
+        # new commits simply posts nothing.
+        repos_enqueued = 0
+        for tracked in tracked_repos:
+            try:
+                await self._enqueuer.enqueue_digest_repo({"repo": tracked["repo"]})
+                repos_enqueued += 1
+            except EnqueueError:
+                logger.warning("digest_repo_enqueue_failed", extra={"repo": tracked["repo"]})
+
         duration_ms = round((time.monotonic() - started) * 1000)
         if posted:
             log_event(
                 logger, HEARTBEAT_EVENT,
                 users=len(users), enqueued=enqueued,
                 publications=len(publications), pubs_enqueued=pubs_enqueued,
+                repos=len(tracked_repos), repos_enqueued=repos_enqueued,
                 channel=channel, duration_ms=duration_ms,
             )
         else:
@@ -412,6 +502,37 @@ class DigestPipeline:
         log_event(logger, "substack_publication_posted", slug=slug, posts=len(section.posts))
         return True
 
+    async def process_repo(self, repo: str) -> bool:
+        """Compute and post one tracked repo's new commits; advance cursor on success.
+
+        Mirrors :meth:`process_publication`: reads with the private-repo GitHub
+        client, posts FIRST, then records dedup SHAs and advances the cursor — a
+        Cloud Tasks retry after a failed post recomputes and reposts. Posts to the
+        cohort digest channel. Returns False when the repo is gone/disabled or has
+        no new activity.
+        """
+        config = await self._repos.config.get()
+        channel = config.get("digest_channel_id", "")
+        tracked = await self._repos.tracked_repos.get(repo)
+        if tracked is None or not tracked.get("enabled", False):
+            return False
+        since = tracked.get("last_cursor")
+
+        async with self._gh_private_factory() as gh:
+            section = await self.compute_repo_section(gh, repo, since)
+        if section is None:
+            return False
+
+        embed = formatter.format_repo_section(section)
+        # Post FIRST — cursor/dedup are only advanced after a successful post.
+        await self._rest.post_channel_message(channel, embeds=[embed])
+
+        await self._repos.processed_commits.record_shas(repo, section.new_shas)
+        if section.new_cursor is not None:
+            await self._repos.tracked_repos.set_cursor(repo, section.new_cursor)
+        log_event(logger, "digest_repo_posted", repo=repo, commits=section.count)
+        return True
+
     # --- on-demand /digest command ---
 
     async def on_demand(self, day: str) -> list[dict[str, Any]]:
@@ -469,6 +590,9 @@ def install_digest() -> None:
     async def _publication(slug: str) -> None:
         await _pipeline().process_publication(slug)
 
+    async def _repo(repo: str) -> None:
+        await _pipeline().process_repo(repo)
+
     async def _on_demand(day: str) -> list[dict[str, Any]]:
         return await _pipeline().on_demand(day or "today")
 
@@ -477,5 +601,6 @@ def install_digest() -> None:
 
     interactions_module.set_digest_handlers(_run, _user)
     interactions_module.set_publication_worker(_publication)
+    interactions_module.set_repo_worker(_repo)
     handlers_module.set_digest_provider(_on_demand)
     handlers_module.set_substack_provider(_on_demand_substack)
