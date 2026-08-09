@@ -7,6 +7,8 @@ Collections:
 - ``config/singleton``                — digest channel/hour, admin role ids
 - ``tracked_publications/{slug}``     — Substack feeds we follow, per-feed cursor
 - ``processed_posts/{slug@post_id}``  — post dedup key, ~90d TTL
+- ``tracked_repos/{owner__repo}``     — repos we scan directly (e.g. private),
+                                        per-repo cursor watermark
 
 Firestore document ids cannot contain ``/``, so ``owner/repo`` (and post ids /
 guids, which are often URLs) are encoded via :func:`_encode` (the logical key is
@@ -311,6 +313,68 @@ class ProcessedPostsRepo:
         await batch.commit()
 
 
+class TrackedReposRepo:
+    """CRUD + cursor management for tracked GitHub repositories.
+
+    Doc id is the ``owner/repo`` slug (encoded — Firestore ids can't contain
+    ``/``). Mirrors :class:`TrackedPublicationsRepo`: a newly added repo's cursor
+    is initialized to the add time (server timestamp) so the scheduled digest
+    reports only commits pushed *after* it was added, never the whole history.
+    These are repos scanned directly (via the list-commits API), which is how
+    private repos — invisible in a user's public Events feed — reach the digest.
+    """
+
+    COLLECTION = "tracked_repos"
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._col = client.collection(self.COLLECTION)
+
+    async def add(self, repo: str, *, added_by: str) -> None:
+        """Add a repo, or re-enable an existing one. Idempotent.
+
+        A re-add re-enables and preserves ``created_at``/``last_cursor`` (so the
+        history before the original add is never back-reported).
+        """
+        doc = self._col.document(_encode(repo))
+        snapshot = await doc.get()
+        if snapshot.exists:
+            await doc.set({"enabled": True}, merge=True)
+            return
+        await doc.set(
+            {
+                "repo": repo,
+                "enabled": True,
+                "added_by": added_by,
+                "created_at": SERVER_TIMESTAMP,
+                # Cursor = add time: only commits after this are ever reported.
+                "last_cursor": SERVER_TIMESTAMP,
+            }
+        )
+
+    async def remove(self, repo: str) -> None:
+        await self._col.document(_encode(repo)).delete()
+
+    async def get(self, repo: str) -> dict[str, Any] | None:
+        snapshot = await self._col.document(_encode(repo)).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
+    async def list_enabled(self) -> list[dict[str, Any]]:
+        query = self._col.where(filter=FieldFilter("enabled", "==", True))
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def list_all(self) -> list[dict[str, Any]]:
+        return [doc.to_dict() async for doc in self._col.stream()]
+
+    async def set_cursor(self, repo: str, cursor: datetime) -> None:
+        await self._col.document(_encode(repo)).set({"last_cursor": cursor}, merge=True)
+
+    async def get_cursor(self, repo: str) -> datetime | None:
+        snapshot = await self._col.document(_encode(repo)).get()
+        if not snapshot.exists:
+            return None
+        return snapshot.to_dict().get("last_cursor")
+
+
 @dataclass(frozen=True)
 class Repositories:
     """Bundle of all repositories over one client (shared by /track + admin)."""
@@ -321,6 +385,7 @@ class Repositories:
     config: ConfigRepo
     tracked_publications: TrackedPublicationsRepo
     processed_posts: ProcessedPostsRepo
+    tracked_repos: TrackedReposRepo
 
 
 def get_repositories(client: AsyncClient | None = None) -> Repositories:
@@ -333,4 +398,5 @@ def get_repositories(client: AsyncClient | None = None) -> Repositories:
         config=ConfigRepo(client),
         tracked_publications=TrackedPublicationsRepo(client),
         processed_posts=ProcessedPostsRepo(client),
+        tracked_repos=TrackedReposRepo(client),
     )

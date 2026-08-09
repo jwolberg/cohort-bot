@@ -55,6 +55,33 @@ async def test_remove_excludes_from_list_enabled(repos) -> None:
     assert [u["username"] for u in enabled] == ["hubot"]
 
 
+async def test_tracked_repos_add_list_remove(repos) -> None:
+    await repos.tracked_repos.add("owner/private", added_by="admin#1")
+    enabled = await repos.tracked_repos.list_enabled()
+    assert [r["repo"] for r in enabled] == ["owner/private"]
+    # Cursor is initialized to add-time (not None) so history is never dumped.
+    assert await repos.tracked_repos.get_cursor("owner/private") is not None
+    await repos.tracked_repos.remove("owner/private")
+    assert await repos.tracked_repos.list_enabled() == []
+
+
+async def test_tracked_repos_add_is_idempotent_preserving_cursor(repos) -> None:
+    await repos.tracked_repos.add("o/r", added_by="admin#1")
+    cursor = await repos.tracked_repos.get_cursor("o/r")
+    await repos.tracked_repos.add("o/r", added_by="admin#2")
+    assert len(await repos.tracked_repos.list_all()) == 1
+    # Re-add re-enables but preserves the original cursor (no back-catalog replay).
+    assert await repos.tracked_repos.get_cursor("o/r") == cursor
+
+
+async def test_tracked_repos_slug_with_slash_roundtrips(repos) -> None:
+    # owner/repo contains a "/", which Firestore doc ids forbid — it must be
+    # encoded on write and returned verbatim on read.
+    await repos.tracked_repos.add("acme/secret-service", added_by="a")
+    got = await repos.tracked_repos.get("acme/secret-service")
+    assert got is not None and got["repo"] == "acme/secret-service"
+
+
 async def test_record_and_check_shas(repos) -> None:
     repo = "octocat/hello-world"
     await repos.processed_commits.record_shas(repo, ["abc123", "def456"])
