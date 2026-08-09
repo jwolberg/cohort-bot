@@ -86,6 +86,26 @@
       </ul>
     </section>
 
+    <!-- Tracked repositories (scanned directly; e.g. private repos) -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-1">Tracked repositories</h2>
+      <p class="text-xs text-slate-500 mb-3">Scanned directly and posted to the cohort channel — use for private repos (needs GITHUB_TOKEN_PRIVATE).</p>
+      <form @submit.prevent="addRepo()" class="flex gap-2 mb-3">
+        <input x-model="newRepo" placeholder="owner/repo"
+               class="flex-1 border rounded px-3 py-2 text-sm" />
+        <button class="bg-slate-800 text-white rounded px-4 py-2 text-sm">Add</button>
+      </form>
+      <ul class="divide-y">
+        <template x-for="r in repos" :key="r.repo">
+          <li class="flex items-center justify-between py-2">
+            <span x-text="r.repo" class="font-mono text-sm"></span>
+            <button @click="removeRepo(r.repo)" class="text-red-600 text-sm">Remove</button>
+          </li>
+        </template>
+        <li x-show="repos.length === 0" class="py-2 text-sm text-slate-400">No tracked repositories.</li>
+      </ul>
+    </section>
+
     <!-- Config -->
     <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
       <h2 class="text-lg font-medium mb-3">Digest config</h2>
@@ -118,12 +138,13 @@
   <script>
     function admin() {
       return {
-        token: '', users: [], publications: [], config: {}, adminRoles: '',
-        newCohortUser: '', newLeaderUser: '', newFeed: '', error: '', notice: '',
+        token: '', users: [], publications: [], repos: [], config: {}, adminRoles: '',
+        newCohortUser: '', newLeaderUser: '', newFeed: '', newRepo: '', error: '', notice: '',
         init() {
           this.token = localStorage.getItem('adminToken') || '';
           this.loadUsers();
           this.loadPublications();
+          this.loadRepos();
           this.loadConfig();
         },
         save() { localStorage.setItem('adminToken', this.token); },
@@ -171,6 +192,18 @@
         },
         async removePublication(slug) {
           try { await this.api('DELETE', '/publications/' + encodeURIComponent(slug)); this.loadPublications(); } catch (e) {}
+        },
+        async loadRepos() {
+          try { this.repos = (await this.api('GET', '/repos')).repos; } catch (e) {}
+        },
+        async addRepo() {
+          if (!this.newRepo) return;
+          try { await this.api('POST', '/repos', { repo: this.newRepo }); this.newRepo = ''; this.loadRepos(); } catch (e) {}
+        },
+        async removeRepo(repo) {
+          // owner/repo carries a slash; the API route uses a path converter, so
+          // send the slug as-is (do not URI-encode the slash into %2F).
+          try { await this.api('DELETE', '/repos/' + repo); this.loadRepos(); } catch (e) {}
         },
         async saveConfig() {
           const roles = this.adminRoles.split(',').map(s => s.trim()).filter(Boolean);
