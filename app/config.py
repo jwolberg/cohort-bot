@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     gcp_project: str = Field(..., alias="GCP_PROJECT")
 
     # --- Optional infrastructure (sensible defaults) ---
+    # Dedicated read-only token for tracked *private* repos. Kept separate from
+    # GITHUB_TOKEN (which reads other users' public activity) so the private,
+    # least-privilege PAT never widens the blast radius of the public path.
+    # Falls back to GITHUB_TOKEN when unset (see DigestPipeline._default_gh_private).
+    github_token_private: str = Field("", alias="GITHUB_TOKEN_PRIVATE")
+
     gcp_location: str = Field("us-central1", alias="GCP_LOCATION")
     firestore_database: str = Field("(default)", alias="FIRESTORE_DATABASE")
 

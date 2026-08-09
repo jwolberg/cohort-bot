@@ -354,6 +354,61 @@ class GitHubClient:
             )
         return result
 
+    async def fetch_commits_since(
+        self, repo: str, since: datetime | None, *, max_pages: int = 3
+    ) -> list[CommitRef]:
+        """Return a repo's commits after ``since`` (newest-first, default branch).
+
+        Repo-centric counterpart to :meth:`fetch_user_commits_since`: it reads a
+        repository directly (``/repos/{repo}/commits``) rather than via a user's
+        public Events feed, so it covers repos that never surface in that feed —
+        notably **private** repos read with a scoped token. ``since`` is an ISO-
+        8601 lower bound the API applies to each commit's *committer* date, so the
+        stored ``timestamp`` (and thus the next cursor) uses committer date too,
+        keeping the cursor and the ``since`` filter consistent. Boundary commits
+        sharing the cursor's second may re-appear; upstream SHA dedup drops ones
+        already reported. Paging stops on a short page or at ``max_pages``.
+        """
+        base_params: dict[str, Any] = {"per_page": 100}
+        if since is not None:
+            base_params["since"] = (
+                since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+        commits: list[CommitRef] = []
+        for page in range(1, max_pages + 1):
+            resp = await self._request(
+                "GET", f"/repos/{repo}/commits", params={**base_params, "page": page}
+            )
+            batch = resp.json()
+            if not batch:
+                break
+            for item in batch:
+                sha = item.get("sha")
+                if not sha:
+                    continue
+                commit = item.get("commit") or {}
+                author = commit.get("author") or {}
+                committer = commit.get("committer") or {}
+                timestamp = (
+                    _parse_ts(committer.get("date"))
+                    or _parse_ts(author.get("date"))
+                    or datetime.now(timezone.utc)
+                )
+                commits.append(
+                    CommitRef(
+                        repo=repo,
+                        sha=sha,
+                        message=commit.get("message", ""),
+                        author=author.get("name", ""),
+                        timestamp=timestamp,
+                        url=item.get("html_url", "")
+                        or f"https://github.com/{repo}/commit/{sha}",
+                    )
+                )
+            if len(batch) < 100:
+                break
+        return commits
+
     async def fetch_contributors(self, repo: str, *, limit: int = 5) -> list[str]:
         resp = await self._request(
             "GET", f"/repos/{repo}/contributors", params={"per_page": limit}
