@@ -5,6 +5,11 @@ and posts a daily engineering-activity digest to a Discord channel, plus
 on-demand slash commands (`/repo`, `/branches`, `/user`, `/digest`) and an
 Alpine.js admin panel.
 
+It can also track individual **repositories** directly — including **private**
+repos, scanned with a dedicated read-only token (`GITHUB_TOKEN_PRIVATE`) — so
+their progress lands in the same daily digest. See
+[DEPLOY.md](DEPLOY.md) → *enable private-repo tracking*.
+
 It uses Discord **HTTP Interactions** (no gateway) so Cloud Run scales to zero,
 **Cloud Scheduler** for the daily trigger, **Cloud Tasks** for per-user fan-out
 and deferred slow-command work, **Firestore (Native mode)** for persistence, and

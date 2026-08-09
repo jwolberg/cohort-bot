@@ -57,6 +57,7 @@ Security is enforced **in-app**, so the service runs with public ingress
 | Discord application ID | Discord Portal → General Information | `DISCORD_APP_ID` |
 | GitHub PAT | github.com → Settings → Developer settings | `GITHUB_TOKEN` |
 | Anthropic API key | console.anthropic.com | `ANTHROPIC_API_KEY` |
+| GitHub PAT for private repos (optional) | github.com → fine-grained token, Contents+Metadata read on the repo | `GITHUB_TOKEN_PRIVATE` |
 
 ---
 
@@ -105,6 +106,37 @@ printf %s 'sk-ant-YOUR_KEY'         | gcloud secrets versions add ANTHROPIC_API_
 ```
 
 > Use `printf %s` (not `echo`) to avoid a trailing newline in the secret.
+
+### Optional — enable private-repo tracking
+
+The daily digest normally discovers activity from each tracked user's **public**
+GitHub Events feed, which never includes private-repo commits. To fold a private
+repo's progress into the digest, the bot scans that repo **directly** with a
+dedicated read-only token. This is opt-in and independent of the steps above.
+
+1. **Create a fine-grained PAT** (least privilege): github.com → Settings →
+   Developer settings → Fine-grained tokens → *Generate new*. Set the resource
+   owner (your account, or the org that owns the repo — the org may need to
+   *allow* fine-grained PATs), **Repository access → Only select repositories →**
+   the private repo, and **Permissions → Repository → Contents: Read-only** and
+   **Metadata: Read-only**. Nothing else. Note the expiry and calendar a rotation.
+2. **Store it** (the secret already exists from Step 1's `setup.sh`):
+   ```bash
+   printf %s 'github_pat_...' | gcloud secrets versions add GITHUB_TOKEN_PRIVATE --data-file=-
+   ```
+3. **Attach it to the service.** `cloudbuild.yaml` does *not* mount this secret
+   (so deploys stay green when it's unset), so attach it once — `--update-secrets`
+   merges, so later builds preserve it:
+   ```bash
+   gcloud run services update "$SERVICE" --region="$REGION" \
+     --update-secrets=GITHUB_TOKEN_PRIVATE=GITHUB_TOKEN_PRIVATE:latest
+   ```
+   If `GITHUB_TOKEN_PRIVATE` is left unset, tracked-repo scans fall back to
+   `GITHUB_TOKEN` (which typically can't read the private repo — the fallback just
+   keeps the app from failing).
+4. **Track the repo** via the admin panel's *Tracked repositories* section (or
+   `POST /admin/api/repos {"repo":"owner/repo"}`). Only commits pushed **after**
+   you add it are reported; it posts to the cohort channel on the daily run.
 
 ---
 
@@ -329,7 +361,8 @@ Slash-command schema changes require re-running `scripts/register_commands.py`.
 | Var | Source | Purpose |
 |---|---|---|
 | `DISCORD_PUBLIC_KEY` / `DISCORD_TOKEN` / `DISCORD_APP_ID` | secret | Discord auth + REST |
-| `GITHUB_TOKEN` | secret | GitHub REST (5k req/hr) |
+| `GITHUB_TOKEN` | secret | GitHub REST (5k req/hr); public per-user activity |
+| `GITHUB_TOKEN_PRIVATE` | secret (optional) | Read-only PAT for tracked private repos; falls back to `GITHUB_TOKEN` |
 | `ANTHROPIC_API_KEY` | secret | Claude summarizer |
 | `GCP_PROJECT` / `GCP_LOCATION` | Cloud Build | project + region |
 | `SERVICE_URL` | Step 4 | Cloud Task targets + OIDC audience |

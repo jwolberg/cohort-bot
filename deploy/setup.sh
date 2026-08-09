@@ -104,7 +104,11 @@ done
 
 echo "==> Secret Manager secrets (create empty; set values with:"
 echo "    printf %s \"<value>\" | gcloud secrets versions add <NAME> --data-file=-)"
-for secret in DISCORD_PUBLIC_KEY DISCORD_TOKEN DISCORD_APP_ID GITHUB_TOKEN ANTHROPIC_API_KEY; do
+# GITHUB_TOKEN_PRIVATE is OPTIONAL — a least-privilege PAT for reading tracked
+# *private* repos. It is created here (and covered by the SA's project-level
+# secretAccessor) but is NOT mounted by cloudbuild.yaml, so deploys stay green
+# even when it has no version. Attach it once set (see DEPLOY.md → Private repos).
+for secret in DISCORD_PUBLIC_KEY DISCORD_TOKEN DISCORD_APP_ID GITHUB_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN_PRIVATE; do
   if ! gcloud secrets describe "${secret}" >/dev/null 2>&1; then
     gcloud secrets create "${secret}" --replication-policy=automatic
   fi

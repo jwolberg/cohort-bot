@@ -4,6 +4,47 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-08-09 — Tracked private repos in the daily digest
+
+Added a repo-centric path so a **private** repo's progress can appear in the
+daily digest. The per-user digest sources commits from `/users/{u}/events/public`,
+which never includes private-repo activity (and GitHub only exposes a user's
+private events to that same user) — so no token alone can surface private commits
+via the user path. The new path scans a repo **directly**.
+
+- **Mirrored the Substack publication feature, not the user path.** A tracked
+  Substack feed is already a non-user, cursor-based, deduped, summarized,
+  posted-per-item, fanned-out source — structurally identical to "scan a repo
+  daily." New `tracked_repos` collection ≈ `tracked_publications`;
+  `compute_repo_section`/`process_repo` ≈ the publication methods;
+  `/tasks/digest/repo` ≈ `/tasks/substack/publication`. Chose this over
+  extending the user path (which can't work) or a new bespoke abstraction.
+- **Dedicated `GITHUB_TOKEN_PRIVATE` secret (optional, falls back to
+  `GITHUB_TOKEN`).** User chose to keep the least-privilege private PAT separate
+  from the public path so the public digest can't regress and the private token
+  is independently rotatable. `_default_gh_private` uses it; the public path is
+  untouched.
+- **Opt-in at the deploy layer.** `setup.sh` creates the secret (covered by the
+  SA's project-level `secretAccessor`), but `cloudbuild.yaml` does **not** mount
+  it — so an existing deploy stays green even before a token exists. Operator
+  attaches it once with `gcloud run services update --update-secrets` (merges, so
+  future builds preserve it). Documented in DEPLOY.md → *enable private-repo
+  tracking*.
+- **Cursor = committer date.** `fetch_commits_since` filters via the list-commits
+  `since` param (committer-date based), so the stored timestamp/cursor uses
+  committer date too, keeping cursor and filter consistent. Add-time cursor init
+  (like publications) means only post-add commits are ever reported.
+- **Managed via admin API/panel, no slash command.** User chose the admin surface
+  (`/admin/api/repos` + a *Tracked repositories* panel section) over a new
+  `/track-repo` command to keep the diff tight; DELETE uses a `{repo:path}`
+  converter for the `owner/repo` slash.
+- **Posts to the cohort `digest_channel_id`** (same as publications); tracked
+  repos aren't grouped like users. Reused `processed_commits` (already keyed by
+  `repo@sha`) for dedup — a commit is reported once regardless of path.
+- **Drive-by fix:** `test_on_demand_substack_lists_recent_posts` hard-dated its
+  sample posts to July and asserted a rolling 30d window; it failed on `main`
+  once the suite ran >30 days later (today is 2026-08-09). Made it now-relative.
+
 ## 2026-07-10 — Linked repo titles in digest embeds
 
 Repo names in digest embeds now link to the repo on GitHub, matching how the
