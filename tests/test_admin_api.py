@@ -248,3 +248,37 @@ async def test_static_panel_serves_required_elements() -> None:
     assert "/admin/api" in body
     assert "Substack publications" in body  # publications section present
     assert "Tracked repositories" in body  # tracked-repos section present
+    assert "Cohort members (GitHub App)" in body  # members section present
+
+
+# --- GitHub App members view (#9) ---
+
+
+async def test_list_members_requires_auth(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        assert (await ac.get("/admin/api/members")).status_code == 401
+
+
+async def test_list_members_returns_installation_status_and_repos(wired) -> None:
+    app, repos, _ = wired
+    await repos.installations.upsert(42, account_login="alice")
+    await repos.members.upsert("alice", installation_id=42)
+    await repos.tracked_repos.add(
+        "alice/one", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+    await repos.tracked_repos.add(
+        "alice/two", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+
+    async with _ac(app) as ac:
+        resp = await ac.get("/admin/api/members", headers=AUTH)
+
+    assert resp.status_code == 200
+    members = resp.json()["members"]
+    assert len(members) == 1
+    m = members[0]
+    assert m["github_login"] == "alice"
+    assert m["installed"] is True
+    assert m["repo_count"] == 2
+    assert m["repos"] == ["alice/one", "alice/two"]

@@ -46,6 +46,11 @@ on the v0 private-repo work + the #4 config).
   cursors + record SHAs, so a failed post is retry-safe. Reuses `compute_repo_section`
   and the shared `repo@sha` dedup, so a repo tracked by both an admin entry and a
   member install is reported once.
+- **#9 — read-only members view.** `GET /admin/api/members` joins members →
+  installation status → their app-sourced repo list; the panel renders it as a
+  "Cohort members (GitHub App)" section distinct from admin "Tracked repositories".
+  No mutation endpoints — consent is the member's (install/uninstall), so admins
+  observe but never add repos on a member's behalf (§4.3).
 - **#8 drive-by fix:** `run_fanout` referenced `channel` in its `digest_not_posted`
   branch, but only assigned it inside the per-group loop — so a cohort with **zero
   tracked users** (now realistic: App-only members) crashed with `UnboundLocalError`.

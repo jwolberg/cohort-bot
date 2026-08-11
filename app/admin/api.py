@@ -206,6 +206,31 @@ async def remove_repo(
     return {"status": "ok", "repo": repo}
 
 
+@router.get("/api/members", dependencies=[Depends(require_admin)])
+async def list_members(repos: Repositories = Depends(get_repos)) -> dict[str, Any]:
+    """List GitHub App members: installation status + their app-sourced repos.
+
+    Read-only — consent is the member's (they install/uninstall the App); admins
+    observe but never add repos on a member's behalf (SPEC-GHAPP §4.3).
+    """
+    members = await repos.members.list_enabled()
+    out: list[dict[str, Any]] = []
+    for member in members:
+        installation_id = member.get("installation_id", "")
+        member_repos = await repos.tracked_repos.list_enabled_for_installation(installation_id)
+        installation = await repos.installations.get(installation_id)
+        out.append(
+            {
+                "github_login": member["github_login"],
+                "installation_id": installation_id,
+                "installed": bool(installation and installation.get("enabled")),
+                "repo_count": len(member_repos),
+                "repos": sorted(r["repo"] for r in member_repos),
+            }
+        )
+    return {"members": out}
+
+
 @router.get("/", include_in_schema=False)
 async def admin_index() -> FileResponse:
     return FileResponse(_STATIC_DIR / "index.html")
