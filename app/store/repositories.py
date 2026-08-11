@@ -329,16 +329,35 @@ class TrackedReposRepo:
     def __init__(self, client: AsyncClient) -> None:
         self._col = client.collection(self.COLLECTION)
 
-    async def add(self, repo: str, *, added_by: str) -> None:
+    async def add(
+        self,
+        repo: str,
+        *,
+        added_by: str,
+        source: str = "admin",
+        installation_id: str | int | None = None,
+        member_login: str | None = None,
+    ) -> None:
         """Add a repo, or re-enable an existing one. Idempotent.
 
         A re-add re-enables and preserves ``created_at``/``last_cursor`` (so the
         history before the original add is never back-reported).
+
+        ``source`` distinguishes admin-registered repos (shared PAT, the default
+        preserves legacy behavior) from GitHub App member installs
+        (``source="app"`` + ``installation_id`` + ``member_login``), so the digest
+        fan-out can pick the right credential and attribute the section to a
+        member. See SPEC-GHAPP §6.2.
         """
         doc = self._col.document(_encode(repo))
         snapshot = await doc.get()
+        link = {"source": source}
+        if installation_id is not None:
+            link["installation_id"] = str(installation_id)
+        if member_login is not None:
+            link["member_login"] = member_login
         if snapshot.exists:
-            await doc.set({"enabled": True}, merge=True)
+            await doc.set({"enabled": True, **link}, merge=True)
             return
         await doc.set(
             {
@@ -348,11 +367,42 @@ class TrackedReposRepo:
                 "created_at": SERVER_TIMESTAMP,
                 # Cursor = add time: only commits after this are ever reported.
                 "last_cursor": SERVER_TIMESTAMP,
+                **link,
             }
         )
 
     async def remove(self, repo: str) -> None:
         await self._col.document(_encode(repo)).delete()
+
+    async def disable(self, repo: str) -> None:
+        """Soft-disable a repo, keeping the doc + cursor for audit."""
+        await self._col.document(_encode(repo)).set({"enabled": False}, merge=True)
+
+    async def list_enabled_for_installation(
+        self, installation_id: str | int
+    ) -> list[dict[str, Any]]:
+        """Enabled repos linked to one App installation.
+
+        Single-field query on ``installation_id`` with ``enabled`` filtered in
+        Python, so no composite Firestore index is required.
+        """
+        query = self._col.where(
+            filter=FieldFilter("installation_id", "==", str(installation_id))
+        )
+        result: list[dict[str, Any]] = []
+        async for doc in query.stream():
+            data = doc.to_dict()
+            if data.get("enabled", False):
+                result.append(data)
+        return result
+
+    async def disable_for_installation(self, installation_id: str | int) -> None:
+        """Soft-disable every repo of an installation (on uninstall)."""
+        query = self._col.where(
+            filter=FieldFilter("installation_id", "==", str(installation_id))
+        )
+        async for doc in query.stream():
+            await doc.reference.set({"enabled": False}, merge=True)
 
     async def get(self, repo: str) -> dict[str, Any] | None:
         snapshot = await self._col.document(_encode(repo)).get()
@@ -375,6 +425,95 @@ class TrackedReposRepo:
         return snapshot.to_dict().get("last_cursor")
 
 
+class InstallationsRepo:
+    """GitHub App installations — one per account that installed the App.
+
+    An installation is the consent record: it names the account, how many repos
+    were shared (``all`` | ``selected``), and whether it's still active. We store
+    the id + account only — never a token (SPEC-GHAPP §5/§6).
+    """
+
+    COLLECTION = "installations"
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._col = client.collection(self.COLLECTION)
+
+    async def upsert(
+        self,
+        installation_id: str | int,
+        *,
+        account_login: str,
+        account_type: str = "",
+        repository_selection: str = "",
+    ) -> None:
+        """Create or re-activate an installation record. Idempotent."""
+        doc = self._col.document(str(installation_id))
+        snapshot = await doc.get()
+        data: dict[str, Any] = {
+            "installation_id": str(installation_id),
+            "account_login": account_login,
+            "account_type": account_type,
+            "repository_selection": repository_selection,
+            "enabled": True,
+            "suspended_at": None,
+        }
+        if not snapshot.exists:
+            data["created_at"] = SERVER_TIMESTAMP
+        await doc.set(data, merge=True)
+
+    async def get(self, installation_id: str | int) -> dict[str, Any] | None:
+        snapshot = await self._col.document(str(installation_id)).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
+    async def list_enabled(self) -> list[dict[str, Any]]:
+        query = self._col.where(filter=FieldFilter("enabled", "==", True))
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def disable(self, installation_id: str | int) -> None:
+        """Mark an installation removed/suspended (on uninstall or suspend)."""
+        await self._col.document(str(installation_id)).set(
+            {"enabled": False, "suspended_at": SERVER_TIMESTAMP}, merge=True
+        )
+
+
+class MembersRepo:
+    """Cohort members keyed by GitHub login — the identity + attribution key.
+
+    No Discord binding (decision SPEC-GHAPP §3.2): the ``installation`` webhook's
+    ``account.login`` is the member.
+    """
+
+    COLLECTION = "members"
+
+    def __init__(self, client: AsyncClient) -> None:
+        self._col = client.collection(self.COLLECTION)
+
+    async def upsert(self, github_login: str, *, installation_id: str | int) -> None:
+        doc = self._col.document(github_login)
+        snapshot = await doc.get()
+        data: dict[str, Any] = {
+            "github_login": github_login,
+            "installation_id": str(installation_id),
+            "enabled": True,
+            "last_seen_event_at": SERVER_TIMESTAMP,
+        }
+        if not snapshot.exists:
+            data["linked_at"] = SERVER_TIMESTAMP
+        await doc.set(data, merge=True)
+
+    async def get(self, github_login: str) -> dict[str, Any] | None:
+        snapshot = await self._col.document(github_login).get()
+        return snapshot.to_dict() if snapshot.exists else None
+
+    async def list_enabled(self) -> list[dict[str, Any]]:
+        query = self._col.where(filter=FieldFilter("enabled", "==", True))
+        return [doc.to_dict() async for doc in query.stream()]
+
+    async def disable(self, github_login: str) -> None:
+        """Soft-disable a member (on uninstall)."""
+        await self._col.document(github_login).set({"enabled": False}, merge=True)
+
+
 @dataclass(frozen=True)
 class Repositories:
     """Bundle of all repositories over one client (shared by /track + admin)."""
@@ -386,6 +525,8 @@ class Repositories:
     tracked_publications: TrackedPublicationsRepo
     processed_posts: ProcessedPostsRepo
     tracked_repos: TrackedReposRepo
+    installations: InstallationsRepo
+    members: MembersRepo
 
 
 def get_repositories(client: AsyncClient | None = None) -> Repositories:
@@ -399,4 +540,6 @@ def get_repositories(client: AsyncClient | None = None) -> Repositories:
         tracked_publications=TrackedPublicationsRepo(client),
         processed_posts=ProcessedPostsRepo(client),
         tracked_repos=TrackedReposRepo(client),
+        installations=InstallationsRepo(client),
+        members=MembersRepo(client),
     )

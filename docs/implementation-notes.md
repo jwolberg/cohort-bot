@@ -22,6 +22,14 @@ on the v0 private-repo work + the #4 config).
   are untouched (`token` stays positional); a client built with neither credential
   now raises. Installation tokens are cached in-process per installation and
   re-minted within 60s of expiry; never persisted.
+- **#6 — extended `tracked_repos` (option A), didn't add a parallel collection.**
+  Rows gain `source` (`admin`|`app`) + `installation_id` + `member_login`; legacy
+  rows read as `admin` (default), so the fan-out branches on source with no
+  migration. New `MembersRepo` (keyed by GitHub login) + `InstallationsRepo` join
+  the bundle. Per-installation repo lookup uses a single-field `installation_id`
+  query with `enabled` filtered in Python, so **no composite Firestore index** is
+  needed. App-repo removal/uninstall is a soft-disable (cursor retained), unlike
+  the admin hard-`remove`.
 
 ## 2026-08-09 — Tracked private repos in the daily digest
 
