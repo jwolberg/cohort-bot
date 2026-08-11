@@ -28,12 +28,29 @@ from app.digest.pipeline import (
 from app.store.repositories import channel_for_group
 from app.substack.client import PostRef, SubstackError
 from app.discord import interactions as interactions_module
+from app.github.app_auth import GitHubAppAuth
 from app.github.client import GitHubClient
 from app.main import create_app
 from app.store.repositories import get_repositories
 from app.tasks import auth as auth_module
 
 BASE = "https://api.github.com"
+
+
+def _app_pem() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+
+# Generated once for the GitHub App installation-digest tests (#8).
+_APP_PEM = _app_pem()
 
 
 class FakeSummarizer:
@@ -46,6 +63,7 @@ class FakeEnqueuer:
         self.digest_users: list[dict] = []
         self.substack_pubs: list[dict] = []
         self.digest_repos: list[dict] = []
+        self.digest_installations: list[dict] = []
 
     async def enqueue_digest_user(self, payload):
         self.digest_users.append(payload)
@@ -58,6 +76,10 @@ class FakeEnqueuer:
     async def enqueue_digest_repo(self, payload):
         self.digest_repos.append(payload)
         return "task/3"
+
+    async def enqueue_digest_installation(self, payload):
+        self.digest_installations.append(payload)
+        return "task/4"
 
 
 class FakeRest:
@@ -895,3 +917,127 @@ def test_digest_repo_dispatches_to_worker(client: TestClient, monkeypatch) -> No
     resp = client.post("/tasks/digest/repo", json={"repo": "o/private"}, headers={"Authorization": "Bearer x"})
     assert resp.status_code == 200
     assert called.get("repo") == "o/private"
+
+
+# --- GitHub App installation digest (#8) ---
+
+
+def _app_pipeline(repos, rest, *, auth):
+    return DigestPipeline(
+        repos, FakeEnqueuer(), get_settings(), rest, FakeSummarizer(),
+        gh_app_factory=lambda: auth,
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_enqueues_one_task_per_installation(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.installations.upsert(42, account_login="alice")
+    await repos.installations.upsert(99, account_login="bob")
+    enqueuer = FakeEnqueuer()
+    pipeline = _pipeline(repos, FakeRest(), enqueuer)
+
+    await pipeline.run_fanout()
+
+    assert {p["installation_id"] for p in enqueuer.digest_installations} == {"42", "99"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_installation_posts_attributed_member_section(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.installations.upsert(42, account_login="alice")
+    for name in ("alice/one", "alice/two"):
+        await repos.tracked_repos.add(
+            name, added_by="app:alice", source="app", installation_id=42, member_login="alice"
+        )
+    respx.post(f"{BASE}/app/installations/42/access_tokens").mock(
+        return_value=httpx.Response(201, json={"token": "ghs_x", "expires_at": "2999-01-01T00:00:00Z"})
+    )
+    _mock_repo_commits("alice/one", [("s1", "feat: add one")])
+    _mock_repo_commits("alice/two", [("s2", "feat: add two")])
+    _mock_repo("alice/one")
+    _mock_repo("alice/two")
+
+    rest = FakeRest()
+    pipeline = _app_pipeline(repos, rest, auth=GitHubAppAuth("123", _APP_PEM))
+    result = await pipeline.process_installation("42")
+
+    assert result is True
+    assert len(rest.posts) == 1  # one attributed member embed, not one per repo
+    embed = rest.posts[0]["embeds"][0]
+    assert embed["title"] == "🧑‍💻 alice"
+    assert "2 repos" in embed["description"]
+    assert await repos.processed_commits.has_sha("alice/one", "s1") is True
+    assert await repos.processed_commits.has_sha("alice/two", "s2") is True
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_process_installation_post_failure_is_retry_safe(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.installations.upsert(42, account_login="alice")
+    await repos.tracked_repos.add(
+        "alice/one", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+    respx.post(f"{BASE}/app/installations/42/access_tokens").mock(
+        return_value=httpx.Response(201, json={"token": "ghs_x", "expires_at": "2999-01-01T00:00:00Z"})
+    )
+    _mock_repo_commits("alice/one", [("s1", "feat: add one")])
+    _mock_repo("alice/one")
+
+    rest = FakeRest(fail=True)
+    pipeline = _app_pipeline(repos, rest, auth=GitHubAppAuth("123", _APP_PEM))
+    with pytest.raises(RuntimeError):
+        await pipeline.process_installation("42")
+
+    # Post failed before any dedup/cursor write → a Cloud Tasks retry recomputes.
+    assert await repos.processed_commits.has_sha("alice/one", "s1") is False
+
+
+@pytest.mark.asyncio
+async def test_process_installation_false_when_app_unconfigured(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.installations.upsert(42, account_login="alice")
+    await repos.tracked_repos.add(
+        "alice/one", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+    pipeline = _app_pipeline(repos, FakeRest(), auth=None)
+    assert await pipeline.process_installation("42") is False
+
+
+@pytest.mark.asyncio
+async def test_process_installation_false_when_no_repos(firestore_client) -> None:
+    repos = get_repositories(firestore_client)
+    await repos.installations.upsert(42, account_login="alice")
+    pipeline = _app_pipeline(repos, FakeRest(), auth=GitHubAppAuth("123", _APP_PEM))
+    assert await pipeline.process_installation("42") is False
+
+
+def test_format_member_section_groups_repos_under_member() -> None:
+    from app.digest.formatter import format_member_section
+
+    sections = [
+        TrackedRepoSection(repo="alice/one", count=2, description="", summary="Did X"),
+        TrackedRepoSection(repo="alice/two", count=3, description="", summary="Did Y"),
+    ]
+    embed = format_member_section("alice", sections)
+    assert embed["title"] == "🧑‍💻 alice"
+    assert "5 commits across 2 repos" in embed["description"]
+
+
+def test_installation_digest_endpoint_dispatches_to_worker(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(auth_module, "verify_oidc_token", lambda t, a: {"email": "digest-bot-sa@cohort-bot-test.iam.gserviceaccount.com"})
+    called = {}
+
+    async def worker(installation_id):
+        called["id"] = installation_id
+
+    interactions_module.set_installation_worker(worker)
+    resp = client.post("/tasks/digest/installation", json={"installation_id": "42"}, headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 200
+    assert called.get("id") == "42"

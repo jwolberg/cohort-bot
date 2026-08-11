@@ -38,6 +38,18 @@ on the v0 private-repo work + the #4 config).
   installations, so repos stay ready to resume on `unsuspend`); `deleted`
   (uninstall) is the full cleanup (member + installation + repos). `/github/setup`
   is a static landing page — no identity binding (§3.2).
+- **#8 — one attributed embed per member, one client per installation.**
+  `run_fanout` enqueues one `/tasks/digest/installation` per enabled installation
+  (best-effort, mirrors the per-user loop). `process_installation` mints the token
+  once, scans all of the member's repos through a single `GitHubClient`, and posts
+  ONE `🧑‍💻 {login}` embed (repos nested) — post-first, then advance per-repo
+  cursors + record SHAs, so a failed post is retry-safe. Reuses `compute_repo_section`
+  and the shared `repo@sha` dedup, so a repo tracked by both an admin entry and a
+  member install is reported once.
+- **#8 drive-by fix:** `run_fanout` referenced `channel` in its `digest_not_posted`
+  branch, but only assigned it inside the per-group loop — so a cohort with **zero
+  tracked users** (now realistic: App-only members) crashed with `UnboundLocalError`.
+  Initialized `channel = ""` before the loop.
 
 ## 2026-08-09 — Tracked private repos in the daily digest
 

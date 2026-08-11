@@ -37,6 +37,7 @@ DigestRunner = Callable[[], Awaitable[None]]
 DigestUserWorker = Callable[[str], Awaitable[None]]
 PublicationWorker = Callable[[str], Awaitable[None]]
 RepoWorker = Callable[[str], Awaitable[None]]
+InstallationWorker = Callable[[str], Awaitable[None]]
 
 _dispatcher: CommandDispatcher | None = None
 _followup_handler: FollowupHandler | None = None
@@ -44,6 +45,7 @@ _digest_runner: DigestRunner | None = None
 _digest_user_worker: DigestUserWorker | None = None
 _publication_worker: PublicationWorker | None = None
 _repo_worker: RepoWorker | None = None
+_installation_worker: InstallationWorker | None = None
 
 
 def set_command_dispatcher(dispatcher: CommandDispatcher) -> None:
@@ -75,6 +77,12 @@ def set_repo_worker(worker: RepoWorker) -> None:
     """Register the per-repo tracked-repo digest worker."""
     global _repo_worker
     _repo_worker = worker
+
+
+def set_installation_worker(worker: InstallationWorker) -> None:
+    """Register the per-installation GitHub App digest worker (SPEC-GHAPP §8.5)."""
+    global _installation_worker
+    _installation_worker = worker
 
 
 def get_public_key() -> str:
@@ -173,4 +181,17 @@ async def tasks_digest_repo(request: Request) -> JSONResponse:
     if not repo:
         raise HTTPException(status_code=400, detail="repo required")
     await _repo_worker(repo)
+    return JSONResponse({"status": "ok"})
+
+
+@router.post("/tasks/digest/installation", dependencies=[Depends(require_oidc)])
+async def tasks_digest_installation(request: Request) -> JSONResponse:
+    """Per-installation GitHub App digest worker enqueued by the fan-out (OIDC-gated)."""
+    if _installation_worker is None:
+        raise HTTPException(status_code=503, detail="installation worker not ready")
+    payload = await request.json()
+    installation_id = payload.get("installation_id")
+    if not installation_id:
+        raise HTTPException(status_code=400, detail="installation_id required")
+    await _installation_worker(installation_id)
     return JSONResponse({"status": "ok"})
