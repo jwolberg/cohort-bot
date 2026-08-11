@@ -195,6 +195,41 @@ async def test_publications_endpoint_requires_admin(wired) -> None:
         assert (await ac.get("/admin/api/publications")).status_code == 401
 
 
+async def test_repos_crud_shares_store_with_pipeline(wired) -> None:
+    app, repos, _ = wired
+    async with _ac(app) as ac:
+        # owner/repo carries a slash — POST body avoids path encoding; the DELETE
+        # route uses a {repo:path} converter so the slug passes through verbatim.
+        assert (
+            await ac.post("/admin/api/repos", json={"repo": "acme/private"}, headers=AUTH)
+        ).status_code == 200
+        listed = (await ac.get("/admin/api/repos", headers=AUTH)).json()["repos"]
+        assert listed[0]["repo"] == "acme/private"
+        # It landed in the same store the digest fan-out reads.
+        assert [r["repo"] for r in await repos.tracked_repos.list_enabled()] == ["acme/private"]
+        assert (
+            await ac.delete("/admin/api/repos/acme/private", headers=AUTH)
+        ).status_code == 200
+        assert (await ac.get("/admin/api/repos", headers=AUTH)).json()["repos"] == []
+
+
+async def test_add_repo_rejects_bad_slug(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        assert (
+            await ac.post("/admin/api/repos", json={"repo": "notaslug"}, headers=AUTH)
+        ).status_code == 400
+        assert (
+            await ac.post("/admin/api/repos", json={"repo": ""}, headers=AUTH)
+        ).status_code == 400
+
+
+async def test_repos_endpoint_requires_admin(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        assert (await ac.get("/admin/api/repos")).status_code == 401
+
+
 async def test_digest_test_enqueues_run(wired) -> None:
     app, _, enqueuer = wired
     async with _ac(app) as ac:
@@ -212,3 +247,38 @@ async def test_static_panel_serves_required_elements() -> None:
     assert "x-data" in body
     assert "/admin/api" in body
     assert "Substack publications" in body  # publications section present
+    assert "Tracked repositories" in body  # tracked-repos section present
+    assert "Cohort members (GitHub App)" in body  # members section present
+
+
+# --- GitHub App members view (#9) ---
+
+
+async def test_list_members_requires_auth(wired) -> None:
+    app, _, _ = wired
+    async with _ac(app) as ac:
+        assert (await ac.get("/admin/api/members")).status_code == 401
+
+
+async def test_list_members_returns_installation_status_and_repos(wired) -> None:
+    app, repos, _ = wired
+    await repos.installations.upsert(42, account_login="alice")
+    await repos.members.upsert("alice", installation_id=42)
+    await repos.tracked_repos.add(
+        "alice/one", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+    await repos.tracked_repos.add(
+        "alice/two", added_by="app:alice", source="app", installation_id=42, member_login="alice"
+    )
+
+    async with _ac(app) as ac:
+        resp = await ac.get("/admin/api/members", headers=AUTH)
+
+    assert resp.status_code == 200
+    members = resp.json()["members"]
+    assert len(members) == 1
+    m = members[0]
+    assert m["github_login"] == "alice"
+    assert m["installed"] is True
+    assert m["repo_count"] == 2
+    assert m["repos"] == ["alice/one", "alice/two"]

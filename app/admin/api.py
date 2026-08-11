@@ -10,6 +10,7 @@ auth in-app.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,9 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 # IAP signs its assertion with these rotating keys (distinct from OAuth certs).
 IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
+
+# A tracked repo is an ``owner/repo`` slug (no spaces, exactly one slash).
+_REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
 # Config keys the panel may edit (one channel per tracked-user group).
 _EDITABLE_CONFIG = (
@@ -170,6 +174,61 @@ async def remove_publication(
 ) -> dict[str, Any]:
     await repos.tracked_publications.remove(slug)
     return {"status": "ok", "slug": slug}
+
+
+@router.get("/api/repos", dependencies=[Depends(require_admin)])
+async def list_repos(repos: Repositories = Depends(get_repos)) -> dict[str, Any]:
+    tracked = await repos.tracked_repos.list_enabled()
+    return {
+        "repos": [
+            {"repo": r["repo"], "added_by": r.get("added_by", "")} for r in tracked
+        ]
+    }
+
+
+@router.post("/api/repos", dependencies=[Depends(require_admin)])
+async def add_repo(
+    payload: dict[str, Any] = Body(...), repos: Repositories = Depends(get_repos)
+) -> dict[str, Any]:
+    repo = (payload.get("repo") or "").strip()
+    if not _REPO_RE.match(repo):
+        raise HTTPException(status_code=400, detail="repo must be 'owner/repo'")
+    await repos.tracked_repos.add(repo, added_by="admin-panel")
+    return {"status": "ok", "repo": repo}
+
+
+@router.delete("/api/repos/{repo:path}", dependencies=[Depends(require_admin)])
+async def remove_repo(
+    repo: str, repos: Repositories = Depends(get_repos)
+) -> dict[str, Any]:
+    # ``owner/repo`` carries a slash, so the path converter captures the whole slug.
+    await repos.tracked_repos.remove(repo)
+    return {"status": "ok", "repo": repo}
+
+
+@router.get("/api/members", dependencies=[Depends(require_admin)])
+async def list_members(repos: Repositories = Depends(get_repos)) -> dict[str, Any]:
+    """List GitHub App members: installation status + their app-sourced repos.
+
+    Read-only — consent is the member's (they install/uninstall the App); admins
+    observe but never add repos on a member's behalf (SPEC-GHAPP §4.3).
+    """
+    members = await repos.members.list_enabled()
+    out: list[dict[str, Any]] = []
+    for member in members:
+        installation_id = member.get("installation_id", "")
+        member_repos = await repos.tracked_repos.list_enabled_for_installation(installation_id)
+        installation = await repos.installations.get(installation_id)
+        out.append(
+            {
+                "github_login": member["github_login"],
+                "installation_id": installation_id,
+                "installed": bool(installation and installation.get("enabled")),
+                "repo_count": len(member_repos),
+                "repos": sorted(r["repo"] for r in member_repos),
+            }
+        )
+    return {"members": out}
 
 
 @router.get("/", include_in_schema=False)

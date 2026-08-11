@@ -22,6 +22,8 @@ logger = get_logger(__name__)
 FOLLOWUP_PATH = "/tasks/followup"
 DIGEST_USER_PATH = "/tasks/digest/user"
 DIGEST_RUN_PATH = "/tasks/digest/run"
+DIGEST_REPO_PATH = "/tasks/digest/repo"
+DIGEST_INSTALLATION_PATH = "/tasks/digest/installation"
 SUBSTACK_PUBLICATION_PATH = "/tasks/substack/publication"
 
 
@@ -92,4 +94,16 @@ class TaskEnqueuer:
         """Enqueue one publication's Substack check (reuses the digest-fanout queue)."""
         return await self.enqueue(
             self._settings.digest_fanout_queue, SUBSTACK_PUBLICATION_PATH, payload
+        )
+
+    async def enqueue_digest_repo(self, payload: dict[str, Any]) -> str:
+        """Enqueue one tracked-repo digest check (reuses the digest-fanout queue)."""
+        return await self.enqueue(
+            self._settings.digest_fanout_queue, DIGEST_REPO_PATH, payload
+        )
+
+    async def enqueue_digest_installation(self, payload: dict[str, Any]) -> str:
+        """Enqueue one GitHub App installation's digest (reuses the digest-fanout queue)."""
+        return await self.enqueue(
+            self._settings.digest_fanout_queue, DIGEST_INSTALLATION_PATH, payload
         )

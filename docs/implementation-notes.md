@@ -4,6 +4,106 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-08-11 — GitHub App for per-member private-repo digest (SPEC-GHAPP / ADR-0002)
+
+Graduating the shared-`GITHUB_TOKEN_PRIVATE` path to per-member consent via a
+GitHub App: members install the App on the repos they choose; the bot reads them
+with short-lived installation tokens. Tickets #4–#10 (this branch stacks #5–#10
+on the v0 private-repo work + the #4 config).
+
+- **#5 — signed the App JWT with `google.auth`, not PyJWT.** The spec/ticket
+  named `PyJWT[crypto]`, but `google-auth` (already a dependency) exposes
+  `google.auth.jwt.encode` + `google.auth.crypt.RSASigner`, which produce exactly
+  the RS256 JWT GitHub expects. Using it avoids a new dependency (CLAUDE.md §11);
+  `cryptography` (present transitively) is used only in tests to generate a keypair.
+- **#5 — `GitHubClient` gained a `token_provider` alongside `token`.** Resolved
+  once in `__aenter__` (a per-run client outlives one ~1h token), so
+  `fetch_commits_since` and downstream calls are unchanged. Static-token callers
+  are untouched (`token` stays positional); a client built with neither credential
+  now raises. Installation tokens are cached in-process per installation and
+  re-minted within 60s of expiry; never persisted.
+- **#6 — extended `tracked_repos` (option A), didn't add a parallel collection.**
+  Rows gain `source` (`admin`|`app`) + `installation_id` + `member_login`; legacy
+  rows read as `admin` (default), so the fan-out branches on source with no
+  migration. New `MembersRepo` (keyed by GitHub login) + `InstallationsRepo` join
+  the bundle. Per-installation repo lookup uses a single-field `installation_id`
+  query with `enabled` filtered in Python, so **no composite Firestore index** is
+  needed. App-repo removal/uninstall is a soft-disable (cursor retained), unlike
+  the admin hard-`remove`.
+- **#7 — webhook is signature-first, with a pure `process_webhook_event`.** HMAC
+  verification (`X-Hub-Signature-256`, raw body) mirrors the Discord Ed25519
+  rule; an unconfigured secret fails **closed**. Event logic lives in a pure
+  function (repos, event, payload) → unit-tested against the emulator without
+  HTTP. `suspend` disables only the installation (fan-out iterates enabled
+  installations, so repos stay ready to resume on `unsuspend`); `deleted`
+  (uninstall) is the full cleanup (member + installation + repos). `/github/setup`
+  is a static landing page — no identity binding (§3.2).
+- **#8 — one attributed embed per member, one client per installation.**
+  `run_fanout` enqueues one `/tasks/digest/installation` per enabled installation
+  (best-effort, mirrors the per-user loop). `process_installation` mints the token
+  once, scans all of the member's repos through a single `GitHubClient`, and posts
+  ONE `🧑‍💻 {login}` embed (repos nested) — post-first, then advance per-repo
+  cursors + record SHAs, so a failed post is retry-safe. Reuses `compute_repo_section`
+  and the shared `repo@sha` dedup, so a repo tracked by both an admin entry and a
+  member install is reported once.
+- **#9 — read-only members view.** `GET /admin/api/members` joins members →
+  installation status → their app-sourced repo list; the panel renders it as a
+  "Cohort members (GitHub App)" section distinct from admin "Tracked repositories".
+  No mutation endpoints — consent is the member's (install/uninstall), so admins
+  observe but never add repos on a member's behalf (§4.3).
+- **#8 drive-by fix:** `run_fanout` referenced `channel` in its `digest_not_posted`
+  branch, but only assigned it inside the per-group loop — so a cohort with **zero
+  tracked users** (now realistic: App-only members) crashed with `UnboundLocalError`.
+  Initialized `channel = ""` before the loop.
+- **#10 — e2e + rollout + deprecation.** `tests/test_gh_app_e2e.py` walks the
+  whole path with GitHub mocked (install webhook → fan-out → attributed member
+  section → uninstall stops scanning; no token persisted). Rollout runbook at
+  `docs/runbooks/github-app.md`. Follow-up #12 files the retirement of the shared
+  `GITHUB_TOKEN_PRIVATE` path — deprecated in place, removed once members migrate.
+  (Test-fixture gotcha: `processed_commits` doc id encodes the repo but **not**
+  the SHA, so mock SHAs must be slash-free like real hex.)
+
+## 2026-08-09 — Tracked private repos in the daily digest
+
+Added a repo-centric path so a **private** repo's progress can appear in the
+daily digest. The per-user digest sources commits from `/users/{u}/events/public`,
+which never includes private-repo activity (and GitHub only exposes a user's
+private events to that same user) — so no token alone can surface private commits
+via the user path. The new path scans a repo **directly**.
+
+- **Mirrored the Substack publication feature, not the user path.** A tracked
+  Substack feed is already a non-user, cursor-based, deduped, summarized,
+  posted-per-item, fanned-out source — structurally identical to "scan a repo
+  daily." New `tracked_repos` collection ≈ `tracked_publications`;
+  `compute_repo_section`/`process_repo` ≈ the publication methods;
+  `/tasks/digest/repo` ≈ `/tasks/substack/publication`. Chose this over
+  extending the user path (which can't work) or a new bespoke abstraction.
+- **Dedicated `GITHUB_TOKEN_PRIVATE` secret (optional, falls back to
+  `GITHUB_TOKEN`).** User chose to keep the least-privilege private PAT separate
+  from the public path so the public digest can't regress and the private token
+  is independently rotatable. `_default_gh_private` uses it; the public path is
+  untouched.
+- **Opt-in at the deploy layer.** `setup.sh` creates the secret (covered by the
+  SA's project-level `secretAccessor`), but `cloudbuild.yaml` does **not** mount
+  it — so an existing deploy stays green even before a token exists. Operator
+  attaches it once with `gcloud run services update --update-secrets` (merges, so
+  future builds preserve it). Documented in DEPLOY.md → *enable private-repo
+  tracking*.
+- **Cursor = committer date.** `fetch_commits_since` filters via the list-commits
+  `since` param (committer-date based), so the stored timestamp/cursor uses
+  committer date too, keeping cursor and filter consistent. Add-time cursor init
+  (like publications) means only post-add commits are ever reported.
+- **Managed via admin API/panel, no slash command.** User chose the admin surface
+  (`/admin/api/repos` + a *Tracked repositories* panel section) over a new
+  `/track-repo` command to keep the diff tight; DELETE uses a `{repo:path}`
+  converter for the `owner/repo` slash.
+- **Posts to the cohort `digest_channel_id`** (same as publications); tracked
+  repos aren't grouped like users. Reused `processed_commits` (already keyed by
+  `repo@sha`) for dedup — a commit is reported once regardless of path.
+- **Drive-by fix:** `test_on_demand_substack_lists_recent_posts` hard-dated its
+  sample posts to July and asserted a rolling 30d window; it failed on `main`
+  once the suite ran >30 days later (today is 2026-08-09). Made it now-relative.
+
 ## 2026-07-10 — Linked repo titles in digest embeds
 
 Repo names in digest embeds now link to the repo on GitHub, matching how the

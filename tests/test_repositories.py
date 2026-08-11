@@ -55,6 +55,33 @@ async def test_remove_excludes_from_list_enabled(repos) -> None:
     assert [u["username"] for u in enabled] == ["hubot"]
 
 
+async def test_tracked_repos_add_list_remove(repos) -> None:
+    await repos.tracked_repos.add("owner/private", added_by="admin#1")
+    enabled = await repos.tracked_repos.list_enabled()
+    assert [r["repo"] for r in enabled] == ["owner/private"]
+    # Cursor is initialized to add-time (not None) so history is never dumped.
+    assert await repos.tracked_repos.get_cursor("owner/private") is not None
+    await repos.tracked_repos.remove("owner/private")
+    assert await repos.tracked_repos.list_enabled() == []
+
+
+async def test_tracked_repos_add_is_idempotent_preserving_cursor(repos) -> None:
+    await repos.tracked_repos.add("o/r", added_by="admin#1")
+    cursor = await repos.tracked_repos.get_cursor("o/r")
+    await repos.tracked_repos.add("o/r", added_by="admin#2")
+    assert len(await repos.tracked_repos.list_all()) == 1
+    # Re-add re-enables but preserves the original cursor (no back-catalog replay).
+    assert await repos.tracked_repos.get_cursor("o/r") == cursor
+
+
+async def test_tracked_repos_slug_with_slash_roundtrips(repos) -> None:
+    # owner/repo contains a "/", which Firestore doc ids forbid — it must be
+    # encoded on write and returned verbatim on read.
+    await repos.tracked_repos.add("acme/secret-service", added_by="a")
+    got = await repos.tracked_repos.get("acme/secret-service")
+    assert got is not None and got["repo"] == "acme/secret-service"
+
+
 async def test_record_and_check_shas(repos) -> None:
     repo = "octocat/hello-world"
     await repos.processed_commits.record_shas(repo, ["abc123", "def456"])
@@ -187,3 +214,79 @@ async def test_config_defaults_then_update(repos) -> None:
     assert updated["digest_channel_id"] == "999"
     assert updated["digest_hour_utc"] == 9
     assert updated["admin_role_ids"] == ["r1", "r2"]
+
+
+# --- GitHub App: installations, members, app-sourced repos (#6) ---
+
+
+async def test_installation_upsert_lists_and_disable(repos) -> None:
+    await repos.installations.upsert(
+        42, account_login="alice", account_type="User", repository_selection="selected"
+    )
+    enabled = await repos.installations.list_enabled()
+    assert [i["installation_id"] for i in enabled] == ["42"]
+    assert enabled[0]["account_login"] == "alice"
+
+    await repos.installations.disable(42)
+    assert await repos.installations.list_enabled() == []
+    # Row is kept (soft-disable) with a suspended_at stamp for audit.
+    got = await repos.installations.get(42)
+    assert got is not None and got["enabled"] is False
+
+
+async def test_installation_upsert_is_idempotent_preserving_created_at(repos) -> None:
+    await repos.installations.upsert(7, account_login="bob")
+    first = await repos.installations.get(7)
+    await repos.installations.upsert(7, account_login="bob", repository_selection="all")
+    second = await repos.installations.get(7)
+    assert len(await repos.installations.list_enabled()) == 1
+    assert first["created_at"] == second["created_at"]
+    assert second["repository_selection"] == "all"
+
+
+async def test_member_upsert_lists_and_disable(repos) -> None:
+    await repos.members.upsert("alice", installation_id=42)
+    enabled = await repos.members.list_enabled()
+    assert [m["github_login"] for m in enabled] == ["alice"]
+    assert enabled[0]["installation_id"] == "42"
+
+    await repos.members.disable("alice")
+    assert await repos.members.list_enabled() == []
+
+
+async def test_app_sourced_repo_carries_source_and_installation(repos) -> None:
+    await repos.tracked_repos.add(
+        "alice/side-project",
+        added_by="webhook",
+        source="app",
+        installation_id=42,
+        member_login="alice",
+    )
+    got = await repos.tracked_repos.get("alice/side-project")
+    assert got["source"] == "app"
+    assert got["installation_id"] == "42"
+    assert got["member_login"] == "alice"
+
+    for_inst = await repos.tracked_repos.list_enabled_for_installation(42)
+    assert [r["repo"] for r in for_inst] == ["alice/side-project"]
+
+
+async def test_disable_for_installation_soft_disables_all_its_repos(repos) -> None:
+    await repos.tracked_repos.add("a/one", added_by="w", source="app", installation_id=42, member_login="a")
+    await repos.tracked_repos.add("a/two", added_by="w", source="app", installation_id=42, member_login="a")
+    # A different installation's repo must be untouched.
+    await repos.tracked_repos.add("b/three", added_by="w", source="app", installation_id=99, member_login="b")
+
+    await repos.tracked_repos.disable_for_installation(42)
+
+    assert await repos.tracked_repos.list_enabled_for_installation(42) == []
+    assert [r["repo"] for r in await repos.tracked_repos.list_enabled_for_installation(99)] == ["b/three"]
+    # Soft-disable keeps the cursor for audit / possible re-enable.
+    assert await repos.tracked_repos.get_cursor("a/one") is not None
+
+
+async def test_admin_repo_defaults_to_admin_source(repos) -> None:
+    await repos.tracked_repos.add("owner/legacy", added_by="admin-panel")
+    got = await repos.tracked_repos.get("owner/legacy")
+    assert got["source"] == "admin"
+    assert "installation_id" not in got

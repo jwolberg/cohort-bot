@@ -21,6 +21,7 @@ from typing import Any, Callable
 from app.config import Settings, get_settings
 from app.digest import formatter
 from app.discord.rest import DiscordREST
+from app.github.app_auth import GitHubAppAuth
 from app.github.client import GitHubClient, NotFoundError
 from app.logging import get_logger, log_event
 from app.store.repositories import (
@@ -68,6 +69,17 @@ class UserSection:
     total: int
     repos: list[RepoSection]
     new_shas: dict[str, list[str]] = dataclass_field(default_factory=dict)
+    new_cursor: datetime | None = None
+
+
+@dataclass
+class TrackedRepoSection:
+    repo: str
+    count: int
+    description: str
+    summary: str
+    latest_messages: list[str] = dataclass_field(default_factory=list)
+    new_shas: list[str] = dataclass_field(default_factory=list)
     new_cursor: datetime | None = None
 
 
@@ -149,6 +161,8 @@ class DigestPipeline:
         summarizer: ClaudeSummarizer,
         *,
         gh_factory: Callable[[], GitHubClient] | None = None,
+        gh_private_factory: Callable[[], GitHubClient] | None = None,
+        gh_app_factory: Callable[[], GitHubAppAuth | None] | None = None,
         substack_factory: Callable[[], SubstackClient] | None = None,
     ) -> None:
         self._repos = repos
@@ -157,10 +171,31 @@ class DigestPipeline:
         self._rest = rest
         self._summarizer = summarizer
         self._gh_factory = gh_factory or self._default_gh
+        self._gh_private_factory = gh_private_factory or self._default_gh_private
+        self._gh_app_factory = gh_app_factory or self._default_gh_app
         self._substack_factory = substack_factory or self._default_substack
 
     def _default_gh(self) -> GitHubClient:
         return GitHubClient(self._settings.github_token, self._repos.repo_cache)
+
+    def _default_gh_app(self) -> GitHubAppAuth | None:
+        """GitHubAppAuth for minting installation tokens, or None if the App is
+        unconfigured (member path stays inert — mirrors ``github_token_private``)."""
+        if not self._settings.github_app_id or not self._settings.github_app_private_key:
+            return None
+        return GitHubAppAuth(
+            self._settings.github_app_id, self._settings.github_app_private_key
+        )
+
+    def _default_gh_private(self) -> GitHubClient:
+        """GitHub client for tracked-repo reads, authed with the private token.
+
+        Uses ``GITHUB_TOKEN_PRIVATE`` when set (a least-privilege PAT scoped to
+        the private repos) and falls back to ``GITHUB_TOKEN`` otherwise, so the
+        feature degrades gracefully when the dedicated secret isn't configured.
+        """
+        token = self._settings.github_token_private or self._settings.github_token
+        return GitHubClient(token, self._repos.repo_cache)
 
     def _default_substack(self) -> SubstackClient:
         return SubstackClient()
@@ -277,6 +312,60 @@ class DigestPipeline:
             new_cursor=new_cursor,
         )
 
+    async def compute_repo_section(
+        self, gh: GitHubClient, repo: str, since: datetime | None, *, dedup: bool = True
+    ) -> TrackedRepoSection | None:
+        """Compute one tracked repo's new commits (repo-centric counterpart to
+        :meth:`compute_section`).
+
+        Fetches commits after ``since`` directly from the repo — so private repos,
+        which never surface in a user's public Events feed, are covered. Advances
+        the cursor past everything fetched, drops low-signal commits, and (with
+        ``dedup``) filters commits already reported; ``processed_commits`` is keyed
+        by ``repo@sha`` and shared with the per-user path, so a commit is reported
+        once regardless of which path first sees it. Returns None when nothing
+        new/substantive remains.
+        """
+        commits = await gh.fetch_commits_since(repo, since)
+        if not commits:
+            return None
+
+        # Advance past EVERYTHING fetched (incl. filtered commits) so noise isn't
+        # re-scanned next run, then keep only signal commits for reporting.
+        new_cursor = max(c.timestamp for c in commits)
+        commits = [c for c in commits if not _is_low_signal(c.message)]
+        if not commits:
+            return None
+        if dedup:
+            commits = [
+                c
+                for c in commits
+                if not await self._repos.processed_commits.has_sha(repo, c.sha)
+            ]
+        if not commits:
+            return None
+
+        try:
+            info = await gh.fetch_repo(repo)
+            description = info.description
+        except NotFoundError:
+            description = ""
+        messages = [c.message for c in commits]
+        summary = await self._summarizer.summarize(
+            repo_description=description,
+            commit_messages=messages,
+            commit_count=len(commits),
+        )
+        return TrackedRepoSection(
+            repo=repo,
+            count=len(commits),
+            description=description,
+            summary=summary,
+            latest_messages=[m.splitlines()[0] for m in messages[:3] if m.strip()],
+            new_shas=[c.sha for c in commits],
+            new_cursor=new_cursor,
+        )
+
     # --- scheduled fan-out ---
 
     async def run_fanout(self) -> int:
@@ -290,6 +379,8 @@ class DigestPipeline:
         config = await self._repos.config.get()
         users = await self._repos.tracked_users.list_enabled()
         publications = await self._repos.tracked_publications.list_enabled()
+        tracked_repos = await self._repos.tracked_repos.list_enabled()
+        installations = await self._repos.installations.list_enabled()
 
         # Partition users by group; each group posts its own header to its own
         # channel. A group with no configured channel is skipped (logged) so its
@@ -301,6 +392,10 @@ class DigestPipeline:
         today = datetime.now(timezone.utc).strftime("%B %-d")
         posted = False
         enqueued = 0
+        # Initialized before the group loop: a cohort using only App installs can
+        # have zero tracked users, so the loop may never assign it (the
+        # digest_not_posted branch below reads it).
+        channel = ""
         for group in GROUPS:
             group_users = by_group.get(group, [])
             if not group_users:
@@ -338,12 +433,42 @@ class DigestPipeline:
             except EnqueueError:
                 logger.warning("substack_pub_enqueue_failed", extra={"slug": pub["slug"]})
 
+        # Fan out one task per enabled tracked repo (private/other repos not
+        # visible via users' public events). Same best-effort rule; a repo with no
+        # new commits simply posts nothing.
+        repos_enqueued = 0
+        for tracked in tracked_repos:
+            try:
+                await self._enqueuer.enqueue_digest_repo({"repo": tracked["repo"]})
+                repos_enqueued += 1
+            except EnqueueError:
+                logger.warning("digest_repo_enqueue_failed", extra={"repo": tracked["repo"]})
+
+        # Fan out one task per enabled GitHub App installation (per-member private
+        # repos). Same best-effort rule; an installation with no new commits posts
+        # nothing.
+        installations_enqueued = 0
+        for inst in installations:
+            try:
+                await self._enqueuer.enqueue_digest_installation(
+                    {"installation_id": inst["installation_id"]}
+                )
+                installations_enqueued += 1
+            except EnqueueError:
+                logger.warning(
+                    "digest_installation_enqueue_failed",
+                    extra={"installation_id": inst["installation_id"]},
+                )
+
         duration_ms = round((time.monotonic() - started) * 1000)
         if posted:
             log_event(
                 logger, HEARTBEAT_EVENT,
                 users=len(users), enqueued=enqueued,
                 publications=len(publications), pubs_enqueued=pubs_enqueued,
+                repos=len(tracked_repos), repos_enqueued=repos_enqueued,
+                installations=len(installations),
+                installations_enqueued=installations_enqueued,
                 channel=channel, duration_ms=duration_ms,
             )
         else:
@@ -412,6 +537,107 @@ class DigestPipeline:
         log_event(logger, "substack_publication_posted", slug=slug, posts=len(section.posts))
         return True
 
+    async def process_repo(self, repo: str) -> bool:
+        """Compute and post one tracked repo's new commits; advance cursor on success.
+
+        Mirrors :meth:`process_publication`: reads with the private-repo GitHub
+        client, posts FIRST, then records dedup SHAs and advances the cursor — a
+        Cloud Tasks retry after a failed post recomputes and reposts. Posts to the
+        cohort digest channel. Returns False when the repo is gone/disabled or has
+        no new activity.
+        """
+        config = await self._repos.config.get()
+        channel = config.get("digest_channel_id", "")
+        tracked = await self._repos.tracked_repos.get(repo)
+        if tracked is None or not tracked.get("enabled", False):
+            return False
+        since = tracked.get("last_cursor")
+
+        async with self._gh_private_factory() as gh:
+            section = await self.compute_repo_section(gh, repo, since)
+        if section is None:
+            return False
+
+        embed = formatter.format_repo_section(section)
+        # Post FIRST — cursor/dedup are only advanced after a successful post.
+        await self._rest.post_channel_message(channel, embeds=[embed])
+
+        await self._repos.processed_commits.record_shas(repo, section.new_shas)
+        if section.new_cursor is not None:
+            await self._repos.tracked_repos.set_cursor(repo, section.new_cursor)
+        log_event(logger, "digest_repo_posted", repo=repo, commits=section.count)
+        return True
+
+    async def process_installation(self, installation_id: str) -> bool:
+        """Compute and post one member's per-installation section (GitHub App).
+
+        Mints a short-lived installation token, scans every repo that member
+        shared with the App, and posts ONE attributed section. Mirrors
+        :meth:`process_repo`'s recovery contract: post FIRST, then record dedup
+        SHAs and advance per-repo cursors — a Cloud Tasks retry after a failed
+        post recomputes and reposts. Returns False when the installation is
+        gone/disabled, the App is unconfigured, or there's no new activity.
+        """
+        installation = await self._repos.installations.get(installation_id)
+        if installation is None or not installation.get("enabled", False):
+            return False
+        login = installation.get("account_login", "") or str(installation_id)
+
+        auth = self._gh_app_factory()
+        if auth is None:
+            logger.warning(
+                "digest_installation_app_unconfigured",
+                extra={"installation_id": installation_id},
+            )
+            return False
+
+        member_repos = await self._repos.tracked_repos.list_enabled_for_installation(
+            installation_id
+        )
+        if not member_repos:
+            await auth.aclose()
+            return False
+
+        try:
+            # One client per installation: the provider mints once (cached),
+            # amortized across all of the member's repos.
+            provider = auth.token_provider(installation_id)
+            sections: list[TrackedRepoSection] = []
+            async with GitHubClient(
+                token_provider=provider, repo_cache=self._repos.repo_cache
+            ) as gh:
+                for tracked in member_repos:
+                    section = await self.compute_repo_section(
+                        gh, tracked["repo"], tracked.get("last_cursor")
+                    )
+                    if section is not None:
+                        sections.append(section)
+        finally:
+            await auth.aclose()
+
+        if not sections:
+            return False
+
+        config = await self._repos.config.get()
+        channel = config.get("digest_channel_id", "")
+        embed = formatter.format_member_section(login, sections)
+        # Post FIRST — cursor/dedup only advance after a successful post.
+        await self._rest.post_channel_message(channel, embeds=[embed])
+
+        for section in sections:
+            await self._repos.processed_commits.record_shas(section.repo, section.new_shas)
+            if section.new_cursor is not None:
+                await self._repos.tracked_repos.set_cursor(section.repo, section.new_cursor)
+        log_event(
+            logger,
+            "digest_installation_posted",
+            installation_id=str(installation_id),
+            login=login,
+            repos=len(sections),
+            commits=sum(s.count for s in sections),
+        )
+        return True
+
     # --- on-demand /digest command ---
 
     async def on_demand(self, day: str) -> list[dict[str, Any]]:
@@ -469,6 +695,12 @@ def install_digest() -> None:
     async def _publication(slug: str) -> None:
         await _pipeline().process_publication(slug)
 
+    async def _repo(repo: str) -> None:
+        await _pipeline().process_repo(repo)
+
+    async def _installation(installation_id: str) -> None:
+        await _pipeline().process_installation(installation_id)
+
     async def _on_demand(day: str) -> list[dict[str, Any]]:
         return await _pipeline().on_demand(day or "today")
 
@@ -477,5 +709,7 @@ def install_digest() -> None:
 
     interactions_module.set_digest_handlers(_run, _user)
     interactions_module.set_publication_worker(_publication)
+    interactions_module.set_repo_worker(_repo)
+    interactions_module.set_installation_worker(_installation)
     handlers_module.set_digest_provider(_on_demand)
     handlers_module.set_substack_provider(_on_demand_substack)

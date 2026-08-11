@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     gcp_project: str = Field(..., alias="GCP_PROJECT")
 
     # --- Optional infrastructure (sensible defaults) ---
+    # Dedicated read-only token for tracked *private* repos. Kept separate from
+    # GITHUB_TOKEN (which reads other users' public activity) so the private,
+    # least-privilege PAT never widens the blast radius of the public path.
+    # Falls back to GITHUB_TOKEN when unset (see DigestPipeline._default_gh_private).
+    github_token_private: str = Field("", alias="GITHUB_TOKEN_PRIVATE")
+
     gcp_location: str = Field("us-central1", alias="GCP_LOCATION")
     firestore_database: str = Field("(default)", alias="FIRESTORE_DATABASE")
 
@@ -65,6 +71,20 @@ class Settings(BaseSettings):
 
     # Optional bootstrap value for the Firestore config singleton.
     default_digest_channel_id: str = Field("", alias="DEFAULT_DIGEST_CHANNEL_ID")
+
+    # --- GitHub App (per-member private-repo digest; SPEC-GHAPP / ADR-0002) ---
+    # A member's App installation is the consent grant: they pick which private
+    # repos the bot may read, and we scan those with short-lived installation
+    # tokens minted from the App private key. All empty-default, so the member
+    # path stays inert until these are configured (mirrors github_token_private).
+    github_app_id: str = Field("", alias="GITHUB_APP_ID")
+    # PEM-encoded App private key; used to sign the App JWT that mints
+    # installation tokens. Injected from Secret Manager, never logged.
+    github_app_private_key: str = Field("", alias="GITHUB_APP_PRIVATE_KEY")
+    # Shared secret for verifying inbound webhook X-Hub-Signature-256.
+    github_app_webhook_secret: str = Field("", alias="GITHUB_APP_WEBHOOK_SECRET")
+    # App slug, used to build the public install URL shared with members.
+    github_app_slug: str = Field("", alias="GITHUB_APP_SLUG")
 
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 

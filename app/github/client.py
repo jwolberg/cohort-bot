@@ -21,7 +21,7 @@ import asyncio
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -122,15 +122,24 @@ class GitHubClient:
 
     def __init__(
         self,
-        token: str,
+        token: str | None = None,
         repo_cache: Any | None = None,
         *,
+        token_provider: Callable[[], Awaitable[str]] | None = None,
         client: httpx.AsyncClient | None = None,
         concurrency: int = 5,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
     ) -> None:
+        # Authenticate with either a static ``token`` (PATs, the public/private
+        # digest paths) or an async ``token_provider`` that returns a token at
+        # connect time — e.g. a GitHub App installation token (see
+        # ``app.github.app_auth.GitHubAppAuth.token_provider``). The provider is
+        # resolved once in ``__aenter__``; a per-run client outlives one token.
+        if token is None and token_provider is None:
+            raise ValueError("GitHubClient requires a token or a token_provider")
         self._token = token
+        self._token_provider = token_provider
         self._repo_cache = repo_cache
         self._external_client = client
         self._client = client
@@ -140,10 +149,13 @@ class GitHubClient:
 
     async def __aenter__(self) -> "GitHubClient":
         if self._client is None:
+            token = self._token
+            if token is None and self._token_provider is not None:
+                token = await self._token_provider()
             self._client = httpx.AsyncClient(
                 base_url=API_BASE,
                 headers={
-                    "Authorization": f"Bearer {self._token}",
+                    "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
@@ -353,6 +365,61 @@ class GitHubClient:
                 )
             )
         return result
+
+    async def fetch_commits_since(
+        self, repo: str, since: datetime | None, *, max_pages: int = 3
+    ) -> list[CommitRef]:
+        """Return a repo's commits after ``since`` (newest-first, default branch).
+
+        Repo-centric counterpart to :meth:`fetch_user_commits_since`: it reads a
+        repository directly (``/repos/{repo}/commits``) rather than via a user's
+        public Events feed, so it covers repos that never surface in that feed —
+        notably **private** repos read with a scoped token. ``since`` is an ISO-
+        8601 lower bound the API applies to each commit's *committer* date, so the
+        stored ``timestamp`` (and thus the next cursor) uses committer date too,
+        keeping the cursor and the ``since`` filter consistent. Boundary commits
+        sharing the cursor's second may re-appear; upstream SHA dedup drops ones
+        already reported. Paging stops on a short page or at ``max_pages``.
+        """
+        base_params: dict[str, Any] = {"per_page": 100}
+        if since is not None:
+            base_params["since"] = (
+                since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+        commits: list[CommitRef] = []
+        for page in range(1, max_pages + 1):
+            resp = await self._request(
+                "GET", f"/repos/{repo}/commits", params={**base_params, "page": page}
+            )
+            batch = resp.json()
+            if not batch:
+                break
+            for item in batch:
+                sha = item.get("sha")
+                if not sha:
+                    continue
+                commit = item.get("commit") or {}
+                author = commit.get("author") or {}
+                committer = commit.get("committer") or {}
+                timestamp = (
+                    _parse_ts(committer.get("date"))
+                    or _parse_ts(author.get("date"))
+                    or datetime.now(timezone.utc)
+                )
+                commits.append(
+                    CommitRef(
+                        repo=repo,
+                        sha=sha,
+                        message=commit.get("message", ""),
+                        author=author.get("name", ""),
+                        timestamp=timestamp,
+                        url=item.get("html_url", "")
+                        or f"https://github.com/{repo}/commit/{sha}",
+                    )
+                )
+            if len(batch) < 100:
+                break
+        return commits
 
     async def fetch_contributors(self, repo: str, *, limit: int = 5) -> list[str]:
         resp = await self._request(

@@ -234,6 +234,49 @@ async def test_user_with_no_commits_returns_empty() -> None:
 
 
 @respx.mock
+async def test_fetch_commits_since_maps_fields_and_sends_since() -> None:
+    # Repo-centric fetch: maps commit fields, uses committer date for the
+    # timestamp (so the cursor aligns with the `since` filter), and passes
+    # `since` as an ISO-8601 "Z" lower bound. A short page stops paging.
+    since = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    route = respx.get(f"{BASE}/repos/o/private/commits").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "sha": "c1",
+                    "html_url": "https://github.com/o/private/commit/c1",
+                    "commit": {
+                        "message": "feat: add thing",
+                        "author": {"name": "Jay", "date": "2026-07-02T08:00:00Z"},
+                        "committer": {"date": "2026-07-02T09:00:00Z"},
+                    },
+                }
+            ],
+        )
+    )
+    async with GitHubClient("tok") as gh:
+        commits = await gh.fetch_commits_since("o/private", since)
+    assert [c.sha for c in commits] == ["c1"]
+    assert commits[0].repo == "o/private"
+    assert commits[0].message == "feat: add thing"
+    assert commits[0].url == "https://github.com/o/private/commit/c1"
+    # committer date wins over author date for cursor consistency.
+    assert commits[0].timestamp == datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc)
+    assert route.call_count == 1  # one short page → no further pagination
+    assert route.calls.last.request.url.params["since"] == "2026-07-01T12:00:00Z"
+
+
+@respx.mock
+async def test_fetch_commits_since_empty_when_no_commits() -> None:
+    respx.get(f"{BASE}/repos/o/empty/commits").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    async with GitHubClient("tok") as gh:
+        assert await gh.fetch_commits_since("o/empty", None) == []
+
+
+@respx.mock
 async def test_404_raises_not_found() -> None:
     respx.get(f"{BASE}/repos/no/repo").mock(return_value=httpx.Response(404))
     async with GitHubClient("tok") as gh:

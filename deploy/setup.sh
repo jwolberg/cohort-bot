@@ -104,11 +104,30 @@ done
 
 echo "==> Secret Manager secrets (create empty; set values with:"
 echo "    printf %s \"<value>\" | gcloud secrets versions add <NAME> --data-file=-)"
-for secret in DISCORD_PUBLIC_KEY DISCORD_TOKEN DISCORD_APP_ID GITHUB_TOKEN ANTHROPIC_API_KEY; do
+# GITHUB_TOKEN_PRIVATE is OPTIONAL — a least-privilege PAT for reading tracked
+# *private* repos. It is created here (and covered by the SA's project-level
+# secretAccessor) but is NOT mounted by cloudbuild.yaml, so deploys stay green
+# even when it has no version. Attach it once set (see DEPLOY.md → Private repos).
+for secret in DISCORD_PUBLIC_KEY DISCORD_TOKEN DISCORD_APP_ID GITHUB_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN_PRIVATE; do
   if ! gcloud secrets describe "${secret}" >/dev/null 2>&1; then
     gcloud secrets create "${secret}" --replication-policy=automatic
   fi
 done
+
+# Optional: GitHub App (per-member private-repo digest; SPEC-GHAPP / ADR-0002).
+# Only the sensitive values are secrets — the App private key (signs the App JWT
+# that mints installation tokens) and the webhook secret (verifies inbound
+# X-Hub-Signature-256). The App id and slug are non-sensitive runtime env, set
+# via --update-env-vars, not secrets. Opt in with ENABLE_GITHUB_APP=1 so default
+# deploys don't provision secrets for an unused feature.
+if [[ "${ENABLE_GITHUB_APP:-0}" == "1" ]]; then
+  echo "==> GitHub App secrets (optional member private-repo path)"
+  for secret in GITHUB_APP_PRIVATE_KEY GITHUB_APP_WEBHOOK_SECRET; do
+    if ! gcloud secrets describe "${secret}" >/dev/null 2>&1; then
+      gcloud secrets create "${secret}" --replication-policy=automatic
+    fi
+  done
+fi
 
 if [[ -z "${SERVICE_URL}" ]]; then
   cat <<EOF
