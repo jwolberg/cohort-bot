@@ -66,6 +66,20 @@ class Settings(BaseSettings):
     # Optional bootstrap value for the Firestore config singleton.
     default_digest_channel_id: str = Field("", alias="DEFAULT_DIGEST_CHANNEL_ID")
 
+    # --- GitHub App (per-member private-repo digest; SPEC-GHAPP / ADR-0002) ---
+    # A member's App installation is the consent grant: they pick which private
+    # repos the bot may read, and we scan those with short-lived installation
+    # tokens minted from the App private key. All empty-default, so the member
+    # path stays inert until these are configured (mirrors github_token_private).
+    github_app_id: str = Field("", alias="GITHUB_APP_ID")
+    # PEM-encoded App private key; used to sign the App JWT that mints
+    # installation tokens. Injected from Secret Manager, never logged.
+    github_app_private_key: str = Field("", alias="GITHUB_APP_PRIVATE_KEY")
+    # Shared secret for verifying inbound webhook X-Hub-Signature-256.
+    github_app_webhook_secret: str = Field("", alias="GITHUB_APP_WEBHOOK_SECRET")
+    # App slug, used to build the public install URL shared with members.
+    github_app_slug: str = Field("", alias="GITHUB_APP_SLUG")
+
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
     @property
