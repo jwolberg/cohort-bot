@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -112,14 +112,18 @@ def _pipeline(repos, rest, enqueuer=None):
     )
 
 
-def _post(post_id, day, *, title="A post", excerpt="Body"):
+def _post(post_id, day, *, title="A post", excerpt="Body", published=None):
+    # `published` defaults to an absolute July 2026 date so the deterministic
+    # cursor tests (which set an explicit `since`) stay stable. Tests that run
+    # against a *relative* window (e.g. /substack "30d") pass a now-relative
+    # `published` so they don't rot as real time advances.
     return PostRef(
         slug="ex.substack.com",
         post_id=post_id,
         title=title,
         url=f"https://ex.substack.com/p/{post_id}",
         author="Writer",
-        published=datetime(2026, 7, day, 10, 0, tzinfo=timezone.utc),
+        published=published or datetime(2026, 7, day, 10, 0, tzinfo=timezone.utc),
         excerpt=excerpt,
     )
 
@@ -464,8 +468,18 @@ async def test_on_demand_substack_lists_recent_posts(firestore_client) -> None:
     await repos.tracked_publications.add(
         "ex.substack.com", "https://ex.substack.com/feed", title="Ex", added_by="a"
     )
-    # 30d window reaches back past the July sample dates regardless of run time.
-    pipeline = _substack_pipeline(repos, FakeRest(), posts=[_post("p1", 2), _post("p2", 3)])
+    # Anchor the sample posts relative to now so the 30d window always includes
+    # them, regardless of the run date (absolute dates would fall out of the
+    # window as time advances — the cause of this test's earlier rot).
+    now = datetime.now(timezone.utc)
+    pipeline = _substack_pipeline(
+        repos,
+        FakeRest(),
+        posts=[
+            _post("p1", 2, published=now - timedelta(days=2)),
+            _post("p2", 3, published=now - timedelta(days=1)),
+        ],
+    )
     embeds = await pipeline.on_demand_substack("30d")
     assert embeds[0]["title"] == "📰 Ex"
     assert "2 posts" in embeds[0]["description"]
