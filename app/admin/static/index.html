@@ -106,6 +106,26 @@
       </ul>
     </section>
 
+    <!-- Cohort members (GitHub App installs; read-only — consent is the member's) -->
+    <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
+      <h2 class="text-lg font-medium mb-1">Cohort members (GitHub App)</h2>
+      <p class="text-xs text-slate-500 mb-3">Self-service: members install the App on the private repos they choose. Read-only — admins don't add repos on a member's behalf.</p>
+      <ul class="divide-y">
+        <template x-for="m in members" :key="m.github_login">
+          <li class="py-2">
+            <div class="flex items-center justify-between">
+              <a :href="'https://github.com/' + m.github_login" target="_blank"
+                 class="font-mono text-sm text-blue-700" x-text="'@' + m.github_login"></a>
+              <span class="text-xs" :class="m.installed ? 'text-emerald-600' : 'text-slate-400'"
+                    x-text="(m.installed ? 'installed' : 'inactive') + ' · ' + m.repo_count + ' repo' + (m.repo_count === 1 ? '' : 's')"></span>
+            </div>
+            <div class="text-xs text-slate-500 font-mono mt-1" x-text="m.repos.join(', ')"></div>
+          </li>
+        </template>
+        <li x-show="members.length === 0" class="py-2 text-sm text-slate-400">No members have installed the GitHub App yet.</li>
+      </ul>
+    </section>
+
     <!-- Config -->
     <section class="mb-6 bg-white rounded-lg shadow-sm p-4">
       <h2 class="text-lg font-medium mb-3">Digest config</h2>
@@ -138,13 +158,14 @@
   <script>
     function admin() {
       return {
-        token: '', users: [], publications: [], repos: [], config: {}, adminRoles: '',
+        token: '', users: [], publications: [], repos: [], members: [], config: {}, adminRoles: '',
         newCohortUser: '', newLeaderUser: '', newFeed: '', newRepo: '', error: '', notice: '',
         init() {
           this.token = localStorage.getItem('adminToken') || '';
           this.loadUsers();
           this.loadPublications();
           this.loadRepos();
+          this.loadMembers();
           this.loadConfig();
         },
         save() { localStorage.setItem('adminToken', this.token); },
@@ -204,6 +225,9 @@
           // owner/repo carries a slash; the API route uses a path converter, so
           // send the slug as-is (do not URI-encode the slash into %2F).
           try { await this.api('DELETE', '/repos/' + repo); this.loadRepos(); } catch (e) {}
+        },
+        async loadMembers() {
+          try { this.members = (await this.api('GET', '/members')).members; } catch (e) {}
         },
         async saveConfig() {
           const roles = this.adminRoles.split(',').map(s => s.trim()).filter(Boolean);

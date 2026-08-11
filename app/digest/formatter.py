@@ -116,6 +116,38 @@ def format_repo_section(section: "TrackedRepoSection") -> dict[str, Any]:
     )
 
 
+def format_member_section(
+    login: str, sections: list["TrackedRepoSection"]
+) -> dict[str, Any]:
+    """One 🧑‍💻 embed for a cohort member's private-repo activity (GitHub App).
+
+    Groups all of the member's tracked repos into a single *attributed* embed —
+    a linked repo title, commit count, and AI summary per repo (mirrors
+    :func:`format_user_section`'s per-repo block). SPEC-GHAPP §4.4.
+    """
+    total = sum(s.count for s in sections)
+    n = len(sections)
+    fields = [
+        responses.field(
+            "​",  # zero-width space: the linked repo title in the value is the heading
+            (
+                f"{_repo_link(s.repo)}\n"
+                f"• {s.count} commit{'s' if s.count != 1 else ''}\n{s.summary}"
+            )[:MAX_EMBED_VALUE_CHARS],
+        )
+        for s in sections
+    ]
+    return responses.embed(
+        f"🧑‍💻 {login}",
+        description=(
+            f"{total} commit{'s' if total != 1 else ''} across "
+            f"{n} repo{'s' if n != 1 else ''}"
+        ),
+        url=f"https://github.com/{login}",
+        fields=fields,
+    )
+
+
 # --- Substack (native excerpt, no LLM summarization) ---
 
 
