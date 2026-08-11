@@ -371,6 +371,15 @@ Slash-command schema changes require re-running `scripts/register_commands.py`.
 | `ADMIN_TOKEN` | optional secret | admin bearer fallback when no IAP |
 | `SUMMARIZER_MODEL` | optional | default `claude-haiku-4-5` |
 | `DIGEST_FANOUT_QUEUE` / `FOLLOWUPS_QUEUE` | optional | queue names (defaults match `setup.sh`) |
+| `GITHUB_APP_ID` / `GITHUB_APP_SLUG` | optional env | GitHub App id + slug (public install URL) for the per-member private-repo digest |
+| `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_WEBHOOK_SECRET` | optional secret | App JWT signing key + webhook HMAC secret; **all four unset ⇒ member path inert** |
+
+> **GitHub App (optional, per-member private repos).** The four `GITHUB_APP_*`
+> vars are empty by default, so the member-consent path is off until configured.
+> Provision the two secrets with `ENABLE_GITHUB_APP=1 … bash deploy/setup.sh`,
+> then set the id/slug via `--update-env-vars`. Full registration + install-link
+> rollout is a later step — see `docs/specs/github-app-member-repos.md`
+> (`SPEC-GHAPP` §11) and `docs/decisions/0002-github-app-for-member-private-repos.md`.
 
 **Firestore `config` singleton** (set via admin API, not env):
 `digest_channel_id`, `digest_hour_utc` (informational — schedule is the Scheduler
