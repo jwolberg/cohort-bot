@@ -52,6 +52,13 @@ def create_app() -> FastAPI:
     except ImportError:  # admin panel (U10) not yet present
         pass
 
+    try:
+        from app.github.webhook import router as github_webhook_router
+
+        app.include_router(github_webhook_router)
+    except ImportError:  # GitHub App webhook (SPEC-GHAPP) not yet present
+        pass
+
     logger.info("app_initialized")
     return app
 

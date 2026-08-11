@@ -30,6 +30,14 @@ on the v0 private-repo work + the #4 config).
   query with `enabled` filtered in Python, so **no composite Firestore index** is
   needed. App-repo removal/uninstall is a soft-disable (cursor retained), unlike
   the admin hard-`remove`.
+- **#7 — webhook is signature-first, with a pure `process_webhook_event`.** HMAC
+  verification (`X-Hub-Signature-256`, raw body) mirrors the Discord Ed25519
+  rule; an unconfigured secret fails **closed**. Event logic lives in a pure
+  function (repos, event, payload) → unit-tested against the emulator without
+  HTTP. `suspend` disables only the installation (fan-out iterates enabled
+  installations, so repos stay ready to resume on `unsuspend`); `deleted`
+  (uninstall) is the full cleanup (member + installation + repos). `/github/setup`
+  is a static landing page — no identity binding (§3.2).
 
 ## 2026-08-09 — Tracked private repos in the daily digest
 
