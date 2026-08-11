@@ -4,6 +4,25 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-08-11 — GitHub App for per-member private-repo digest (SPEC-GHAPP / ADR-0002)
+
+Graduating the shared-`GITHUB_TOKEN_PRIVATE` path to per-member consent via a
+GitHub App: members install the App on the repos they choose; the bot reads them
+with short-lived installation tokens. Tickets #4–#10 (this branch stacks #5–#10
+on the v0 private-repo work + the #4 config).
+
+- **#5 — signed the App JWT with `google.auth`, not PyJWT.** The spec/ticket
+  named `PyJWT[crypto]`, but `google-auth` (already a dependency) exposes
+  `google.auth.jwt.encode` + `google.auth.crypt.RSASigner`, which produce exactly
+  the RS256 JWT GitHub expects. Using it avoids a new dependency (CLAUDE.md §11);
+  `cryptography` (present transitively) is used only in tests to generate a keypair.
+- **#5 — `GitHubClient` gained a `token_provider` alongside `token`.** Resolved
+  once in `__aenter__` (a per-run client outlives one ~1h token), so
+  `fetch_commits_since` and downstream calls are unchanged. Static-token callers
+  are untouched (`token` stays positional); a client built with neither credential
+  now raises. Installation tokens are cached in-process per installation and
+  re-minted within 60s of expiry; never persisted.
+
 ## 2026-08-09 — Tracked private repos in the daily digest
 
 Added a repo-centric path so a **private** repo's progress can appear in the

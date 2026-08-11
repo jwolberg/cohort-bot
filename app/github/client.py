@@ -21,7 +21,7 @@ import asyncio
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -122,15 +122,24 @@ class GitHubClient:
 
     def __init__(
         self,
-        token: str,
+        token: str | None = None,
         repo_cache: Any | None = None,
         *,
+        token_provider: Callable[[], Awaitable[str]] | None = None,
         client: httpx.AsyncClient | None = None,
         concurrency: int = 5,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
     ) -> None:
+        # Authenticate with either a static ``token`` (PATs, the public/private
+        # digest paths) or an async ``token_provider`` that returns a token at
+        # connect time — e.g. a GitHub App installation token (see
+        # ``app.github.app_auth.GitHubAppAuth.token_provider``). The provider is
+        # resolved once in ``__aenter__``; a per-run client outlives one token.
+        if token is None and token_provider is None:
+            raise ValueError("GitHubClient requires a token or a token_provider")
         self._token = token
+        self._token_provider = token_provider
         self._repo_cache = repo_cache
         self._external_client = client
         self._client = client
@@ -140,10 +149,13 @@ class GitHubClient:
 
     async def __aenter__(self) -> "GitHubClient":
         if self._client is None:
+            token = self._token
+            if token is None and self._token_provider is not None:
+                token = await self._token_provider()
             self._client = httpx.AsyncClient(
                 base_url=API_BASE,
                 headers={
-                    "Authorization": f"Bearer {self._token}",
+                    "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
