@@ -55,6 +55,13 @@ on the v0 private-repo work + the #4 config).
   branch, but only assigned it inside the per-group loop — so a cohort with **zero
   tracked users** (now realistic: App-only members) crashed with `UnboundLocalError`.
   Initialized `channel = ""` before the loop.
+- **#10 — e2e + rollout + deprecation.** `tests/test_gh_app_e2e.py` walks the
+  whole path with GitHub mocked (install webhook → fan-out → attributed member
+  section → uninstall stops scanning; no token persisted). Rollout runbook at
+  `docs/runbooks/github-app.md`. Follow-up #12 files the retirement of the shared
+  `GITHUB_TOKEN_PRIVATE` path — deprecated in place, removed once members migrate.
+  (Test-fixture gotcha: `processed_commits` doc id encodes the repo but **not**
+  the SHA, so mock SHAs must be slash-free like real hex.)
 
 ## 2026-08-09 — Tracked private repos in the daily digest
 
