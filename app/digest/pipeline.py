@@ -436,8 +436,16 @@ class DigestPipeline:
         # Fan out one task per enabled tracked repo (private/other repos not
         # visible via users' public events). Same best-effort rule; a repo with no
         # new commits simply posts nothing.
+        #
+        # App-sourced repos (those linked to an installation) are EXCLUDED here:
+        # the direct path reads with the shared PAT, which can't see a member's
+        # private repos (GitHub returns 404), so a direct task would just fail and
+        # retry. They reach the digest via the per-installation fan-out below,
+        # which uses the App's installation token.
         repos_enqueued = 0
         for tracked in tracked_repos:
+            if tracked.get("installation_id"):
+                continue
             try:
                 await self._enqueuer.enqueue_digest_repo({"repo": tracked["repo"]})
                 repos_enqueued += 1

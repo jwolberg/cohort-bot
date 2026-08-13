@@ -4,6 +4,31 @@ Running log of decisions, deviations, and tradeoffs made while executing the
 [GitHub Digest Discord Bot plan](plans/2026-07-02-001-feat-github-digest-discord-bot-plan.md).
 Dated, tied to the implementation unit (U-ID) being worked.
 
+## 2026-08-13 — Fix: fan-out double-processed App-sourced repos (prod bug)
+
+Found while investigating the 2026-08-13 08:00 UTC nightly run, which looked
+short and threw a burst of 500s. Diagnosis from Cloud Logging (`cohort-bot-1`,
+`digest-bot`): the run's header + 31 user tasks + 4 publications + 1 App
+installation section all posted fine, but `/tasks/digest/repo` 500'd **48
+times** — all three tracked repos (`jwolberg/{situation,cfo-ai,alley-oop-1}`)
+404ing.
+
+- **Root cause (code, not config).** All three repos are **App-sourced**
+  (`source="app"`, `installation_id=153229844`, member `jwolberg`), so the
+  per-installation fan-out already covers them with the App's installation token.
+  But `run_fanout()` also enqueued a **direct** `/tasks/digest/repo` per repo via
+  `tracked_repos.list_enabled()`, which returns App-sourced repos too. The direct
+  path reads with the shared PAT, which can't see a member's private repos →
+  GitHub 404 → 500 → Cloud Tasks retried (`maxAttempts=100`). No digest content
+  was lost: the App section posted the one repo with new activity (15 commits).
+- **Fix.** `run_fanout()` now skips any tracked repo carrying an
+  `installation_id` in the direct fan-out (they belong to the installation path).
+  Guarded with `test_fanout_excludes_app_sourced_repos_from_direct_path`.
+- **Cleanup.** Purged the 3 stuck retrying tasks from the `digest-fanout` queue.
+- **Follow-up (infra).** `digest-fanout` `retryConfig.maxAttempts=100` is far too
+  high for a best-effort daily digest — a permanent failure becomes a day-long
+  retry storm. Lowering it (see `deploy/setup.sh`).
+
 ## 2026-08-11 — GitHub App for per-member private-repo digest (SPEC-GHAPP / ADR-0002)
 
 Graduating the shared-`GITHUB_TOKEN_PRIVATE` path to per-member consent via a

@@ -644,6 +644,38 @@ async def test_fanout_enqueues_one_task_per_tracked_repo(firestore_client) -> No
     assert {p["repo"] for p in enqueuer.digest_repos} == {"o/a", "o/b"}
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_fanout_excludes_app_sourced_repos_from_direct_path(firestore_client) -> None:
+    """App-sourced repos (linked to an installation) must NOT be enqueued on the
+    direct PAT path — the shared PAT can't read a member's private repos (GitHub
+    404), so a direct task just fails and retries. They are covered by the
+    per-installation fan-out instead. Only direct/admin-sourced repos fan out here.
+    """
+    repos = get_repositories(firestore_client)
+    await repos.config.update({"digest_channel_id": "chan"})
+    await repos.tracked_users.add("jay", added_by="a")
+    await repos.tracked_repos.add("o/direct", added_by="a")  # admin/PAT path
+    await repos.tracked_repos.add(
+        "o/appish",
+        added_by="app:jay",
+        source="app",
+        installation_id="153229844",
+        member_login="jay",
+    )
+    await repos.installations.upsert(
+        "153229844", account_login="jay", account_type="User", repository_selection="selected"
+    )
+    enqueuer = FakeEnqueuer()
+    pipeline = _pipeline(repos, FakeRest(), enqueuer)
+
+    await pipeline.run_fanout()
+
+    assert {p["repo"] for p in enqueuer.digest_repos} == {"o/direct"}
+    # The app-sourced repo still reaches the digest via the installation fan-out.
+    assert {p["installation_id"] for p in enqueuer.digest_installations} == {"153229844"}
+
+
 def test_format_repo_section_renders_commits() -> None:
     section = TrackedRepoSection(
         repo="o/private",
