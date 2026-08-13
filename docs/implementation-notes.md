@@ -25,9 +25,12 @@ times** — all three tracked repos (`jwolberg/{situation,cfo-ai,alley-oop-1}`)
   `installation_id` in the direct fan-out (they belong to the installation path).
   Guarded with `test_fanout_excludes_app_sourced_repos_from_direct_path`.
 - **Cleanup.** Purged the 3 stuck retrying tasks from the `digest-fanout` queue.
-- **Follow-up (infra).** `digest-fanout` `retryConfig.maxAttempts=100` is far too
-  high for a best-effort daily digest — a permanent failure becomes a day-long
-  retry storm. Lowering it (see `deploy/setup.sh`).
+- **Infra fix.** `digest-fanout` `retryConfig.maxAttempts` was 100 (Cloud Tasks
+  default) — far too high for a best-effort daily digest; a permanent failure
+  became a day-long retry storm. Lowered to **3** (`FANOUT_MAX_ATTEMPTS` in
+  `deploy/setup.sh`, which now also `queues update`s an existing queue to
+  converge it) and applied live to `cohort-bot-1`. A failed task still self-heals
+  on the next run (cursor advances only after a successful post).
 
 ## 2026-08-11 — GitHub App for per-member private-repo digest (SPEC-GHAPP / ADR-0002)
 
