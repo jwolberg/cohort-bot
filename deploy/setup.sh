@@ -22,6 +22,12 @@ SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 REPO="${REPO:-digest-bot}"
 FANOUT_QUEUE="${FANOUT_QUEUE:-digest-fanout}"
 FOLLOWUPS_QUEUE="${FOLLOWUPS_QUEUE:-interaction-followups}"
+# Daily digest is best-effort: a failed fan-out task (a user/repo/installation
+# section) is re-picked on the next run because the cursor only advances after a
+# successful post. Cap retries low — the Cloud Tasks default of 100 attempts
+# turns a permanent failure into a day-long retry storm. 3 attempts absorb a
+# transient blip (cold start, Discord 5xx) without the storm.
+FANOUT_MAX_ATTEMPTS="${FANOUT_MAX_ATTEMPTS:-3}"
 DIGEST_HOUR_UTC="${DIGEST_HOUR_UTC:-13}"
 # SERVICE_URL is the deployed Cloud Run URL; required for Scheduler/Tasks targets
 # and the OIDC audience. Deploy once (Cloud Build) to learn it, then re-run.
@@ -101,6 +107,10 @@ for q in "${FANOUT_QUEUE}" "${FOLLOWUPS_QUEUE}"; do
     gcloud tasks queues create "${q}" --location="${REGION}"
   fi
 done
+# Enforce the low retry cap on the fan-out queue (idempotent; also converges a
+# queue that already exists with the Cloud Tasks default of 100 attempts).
+gcloud tasks queues update "${FANOUT_QUEUE}" --location="${REGION}" \
+  --max-attempts="${FANOUT_MAX_ATTEMPTS}"
 
 echo "==> Secret Manager secrets (create empty; set values with:"
 echo "    printf %s \"<value>\" | gcloud secrets versions add <NAME> --data-file=-)"
