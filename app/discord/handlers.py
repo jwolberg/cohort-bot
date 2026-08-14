@@ -279,13 +279,13 @@ class CommandHandler:
             return responses.embed("Unreachable", description=f"Could not read the feed at `{feed_url}`.")
         if not view.posts:
             return responses.embed(
-                f"📰 {view.title}",
+                view.title,
                 description="No recent posts.",
                 url=view.link or None,
             )
         fields = [_post_field(p) for p in view.posts[:MAX_FIELDS_PER_EMBED]]
         return responses.embed(
-            f"📰 {view.title}",
+            view.title,
             description=view.description or None,
             url=view.link or None,
             fields=fields,

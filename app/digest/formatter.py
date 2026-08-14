@@ -99,7 +99,7 @@ def format_digest(date_label: str, sections: list["UserSection"]) -> list[dict[s
 
 
 def format_repo_section(section: "TrackedRepoSection") -> dict[str, Any]:
-    """One 📦 embed for a single tracked repo's new commits (scheduled per-repo).
+    """One embed for a single tracked repo's new commits (scheduled per-repo).
 
     Mirrors :func:`format_user_section`'s per-repo block: an AI summary followed
     by the latest commit subjects, under a linked repo title.
@@ -109,7 +109,7 @@ def format_repo_section(section: "TrackedRepoSection") -> dict[str, Any]:
     value = (section.summary + (f"\n{lines}" if lines else ""))[:MAX_EMBED_VALUE_CHARS]
     fields = [responses.field("​", value)] if value else []
     return responses.embed(
-        f"📦 {section.repo}",
+        section.repo,
         description=f"{n} new commit{'s' if n != 1 else ''}",
         url=f"https://github.com/{section.repo}",
         fields=fields,
@@ -119,7 +119,7 @@ def format_repo_section(section: "TrackedRepoSection") -> dict[str, Any]:
 def format_member_section(
     login: str, sections: list["TrackedRepoSection"]
 ) -> dict[str, Any]:
-    """One 🧑‍💻 embed for a cohort member's private-repo activity (GitHub App).
+    """One embed for a cohort member's private-repo activity (GitHub App).
 
     Groups all of the member's tracked repos into a single *attributed* embed —
     a linked repo title, commit count, and AI summary per repo (mirrors
@@ -138,7 +138,7 @@ def format_member_section(
         for s in sections
     ]
     return responses.embed(
-        f"🧑‍💻 {login}",
+        login,
         description=(
             f"{total} commit{'s' if total != 1 else ''} across "
             f"{n} repo{'s' if n != 1 else ''}"
@@ -160,11 +160,11 @@ def _post_field(post: Any) -> dict[str, Any]:
 
 
 def format_publication_section(section: "PublicationSection") -> dict[str, Any]:
-    """One 📰 embed for a single publication's new posts (scheduled per-pub message)."""
+    """One embed for a single publication's new posts (scheduled per-pub message)."""
     n = len(section.posts)
     fields = [_post_field(p) for p in section.posts[:MAX_FIELDS_PER_EMBED]]
     return responses.embed(
-        f"📰 {section.title}",
+        section.title,
         description=f"{n} new post{'s' if n != 1 else ''}",
         url=section.feed_url or None,
         fields=fields,
@@ -176,7 +176,7 @@ def format_substack(date_label: str, sections: list["PublicationSection"]) -> li
     if not sections:
         return [
             responses.embed(
-                "📰 Substack", description=f"{date_label}\nNo recent posts to report."
+                "Substack", description=f"{date_label}\nNo recent posts to report."
             )
         ]
     embeds = [format_publication_section(s) for s in sections]
