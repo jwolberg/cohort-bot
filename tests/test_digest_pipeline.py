@@ -420,7 +420,7 @@ def test_format_publication_section_renders_posts() -> None:
         posts=[_post("p1", 2, title="Hello", excerpt="An excerpt")],
     )
     embed = format_publication_section(section)
-    assert embed["title"] == "📰 The Example"
+    assert embed["title"] == "The Example"
     assert embed["description"] == "1 new post"
     assert '"Hello"' == embed["fields"][0]["name"]
     assert "An excerpt" in embed["fields"][0]["value"]
@@ -532,7 +532,7 @@ async def test_on_demand_substack_lists_recent_posts(firestore_client) -> None:
     ]
     pipeline = _substack_pipeline(repos, FakeRest(), posts=recent)
     embeds = await pipeline.on_demand_substack("30d")
-    assert embeds[0]["title"] == "📰 Ex"
+    assert embeds[0]["title"] == "Ex"
     assert "2 posts" in embeds[0]["description"]
 
 
@@ -685,7 +685,7 @@ def test_format_repo_section_renders_commits() -> None:
         latest_messages=["feat: add importer", "feat: wire it up"],
     )
     embed = format_repo_section(section)
-    assert embed["title"] == "📦 o/private"
+    assert embed["title"] == "o/private"
     assert embed["description"] == "2 new commits"
     assert embed["url"] == "https://github.com/o/private"
     assert "Shipped the importer." in embed["fields"][0]["value"]
@@ -1001,7 +1001,7 @@ async def test_process_installation_posts_attributed_member_section(firestore_cl
     assert result is True
     assert len(rest.posts) == 1  # one attributed member embed, not one per repo
     embed = rest.posts[0]["embeds"][0]
-    assert embed["title"] == "🧑‍💻 alice"
+    assert embed["title"] == "alice"
     assert "2 repos" in embed["description"]
     assert await repos.processed_commits.has_sha("alice/one", "s1") is True
     assert await repos.processed_commits.has_sha("alice/two", "s2") is True
@@ -1058,7 +1058,7 @@ def test_format_member_section_groups_repos_under_member() -> None:
         TrackedRepoSection(repo="alice/two", count=3, description="", summary="Did Y"),
     ]
     embed = format_member_section("alice", sections)
-    assert embed["title"] == "🧑‍💻 alice"
+    assert embed["title"] == "alice"
     assert "5 commits across 2 repos" in embed["description"]
 
 

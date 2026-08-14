@@ -197,7 +197,7 @@ async def test_substack_followup_calls_provider_and_patches(slow_handler) -> Non
 
     async def provider(window):
         captured["window"] = window
-        return [responses.embed("📰 Substack", description="Last 7 days")]
+        return [responses.embed("Substack", description="Last 7 days")]
 
     handlers_module.set_substack_provider(provider)
     await handler.run_followup({
@@ -205,7 +205,7 @@ async def test_substack_followup_calls_provider_and_patches(slow_handler) -> Non
         "command": "substack", "sub": None, "options": {"window": "7d"},
     })
     assert captured["window"] == "7d"
-    assert rest.edits[0]["embeds"][0]["title"] == "📰 Substack"
+    assert rest.edits[0]["embeds"][0]["title"] == "Substack"
 
 
 # --- /publication slow path (mirrors /repo) ---
@@ -255,7 +255,7 @@ async def test_publication_followup_builds_embed_and_patches(slow_handler) -> No
         "command": "publication", "sub": None, "options": {"publication": feed},
     })
     embed = rest.edits[0]["embeds"][0]
-    assert embed["title"] == "📰 The Pragmatic Engineer"
+    assert embed["title"] == "The Pragmatic Engineer"
     assert embed["description"] == "A newsletter about engineering."
     assert embed["fields"][0]["name"] == '"Latest Post"'
 

@@ -147,7 +147,7 @@ async def test_install_to_digest_end_to_end(firestore_client) -> None:
     assert posted is True
     assert len(rest.posts) == 1
     embed = rest.posts[0]["embeds"][0]
-    assert embed["title"] == "🧑‍💻 alice"  # attributed to the member's login
+    assert embed["title"] == "alice"  # attributed to the member's login
     assert rest.posts[0]["channel"] == "cohort-chan"
     assert await repos.processed_commits.has_sha("alice/secret", _repo_sha("alice/secret")) is True
 
